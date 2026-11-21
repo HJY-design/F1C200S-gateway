@@ -1,0 +1,9 @@
+#!/bin/sh
+# Match complete argv tokens belonging to an owned PID file; never signal here.
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || exit 2
+read -r task 2>/dev/null < "$1" || exit 1
+case "$task" in ''|*[!0-9]*) exit 1 ;; esac
+kill -0 "$task" 2>/dev/null || exit 1
+args=$(tr '\000' '\n' 2>/dev/null < "/proc/$task/cmdline") || exit 1
+printf '%s\n' "$args" | grep -F -x -q -- "$2" || exit 1
+[ "$#" -lt 3 ] || printf '%s\n' "$args" | grep -F -x -q -- "$3" || exit 1

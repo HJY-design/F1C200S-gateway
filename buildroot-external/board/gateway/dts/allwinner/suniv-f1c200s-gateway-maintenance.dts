@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+// RAM bring-up while the PC remains attached to the board USB connector.
+#include "suniv-f1c200s-gateway.dts"
+
+/ {
+    model = "Custom F1C200S Gateway - UART RAM Maintenance";
+};
+
+// Never enable the board's Host VBUS source while connected to the PC.
+&reg_usb0_vbus { status = "disabled"; };
+&usb_power_control { status = "disabled"; };
+&usb_otg { status = "disabled"; };
+&usbphy { status = "disabled"; };
+
+// Leave ESP transport/reset idle during initial CPU, DDR and NAND testing.
+&spi1 { status = "disabled"; };

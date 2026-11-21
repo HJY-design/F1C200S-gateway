@@ -1,0 +1,21 @@
+/* W25N01GV: 128 MiB, 2048-byte pages, 128 KiB eraseblocks.
+ * Shared by Linux and U-Boot; offsets are physical partition boundaries.
+ * Writers/readers skip factory bad blocks inside each partition.
+ */
+partitions {
+    compatible = "fixed-partitions";
+    #address-cells = <1>;
+    #size-cells = <1>;
+    partition@0 {
+        label = "boot";
+        reg = <0x00000000 0x00400000>;
+    };
+    partition@400000 {
+        label = "kernel";
+        reg = <0x00400000 0x00800000>;
+    };
+    partition@c00000 {
+        label = "rootfs";
+        reg = <0x00c00000 0x07400000>;
+    };
+};

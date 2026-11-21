@@ -1,0 +1,31 @@
+#!/bin/sh
+ntp_pid=
+printf '%s\n' "$$" > /run/gateway-time.pid
+stop_time() {
+  if [ -n "$ntp_pid" ] && gateway-process-alive /run/gateway-ntp.pid /bin/busybox ntpd &&
+     [ "$(cat /run/gateway-ntp.pid)" = "$ntp_pid" ]; then
+    kill "$ntp_pid" 2>/dev/null
+    wait "$ntp_pid" 2>/dev/null
+  fi
+  rm -f /run/gateway-ntp.pid /run/gateway-time.pid
+  exit 0
+}
+trap stop_time INT TERM
+while :; do
+  if gateway-process-alive /run/gateway-ntp.pid /bin/busybox ntpd; then
+    ntp_pid=$(cat /run/gateway-ntp.pid)
+    while gateway-process-alive /run/gateway-ntp.pid /bin/busybox ntpd &&
+          [ "$(cat /run/gateway-ntp.pid)" = "$ntp_pid" ]; do sleep 5; done
+    ntp_pid=
+    continue
+  fi
+  if ip route | grep -q '^default'; then
+    /bin/busybox ntpd -n -p pool.ntp.org -p ntp.ubuntu.com > /run/gateway-ntp.log 2>&1 &
+    ntp_pid=$!
+    printf '%s\n' "$ntp_pid" > /run/gateway-ntp.pid
+    wait "$ntp_pid"
+    rm -f /run/gateway-ntp.pid
+    ntp_pid=
+  fi
+  sleep 10
+done

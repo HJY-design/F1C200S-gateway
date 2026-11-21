@@ -1,0 +1,7 @@
+// Core + Wi-Fi commissioning configuration. Keep USB Host VBUS disabled.
+#include "suniv-f1c200s-gateway.dts"
+&reg_usb0_vbus { status = "disabled"; };
+&usb_power_control { status = "disabled"; };
+&usbphy { status = "disabled"; };
+&usb_otg { status = "disabled"; };
+&spi1 { status = "okay"; wifi@0 { spi-max-frequency = <1000000>; }; };

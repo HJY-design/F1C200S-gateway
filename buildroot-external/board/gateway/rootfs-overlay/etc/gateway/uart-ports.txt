@@ -1,0 +1,14 @@
+F1C200S gateway board UART assignment (3.3V TTL, common GND):
+
+UART0 /dev/ttyS0: Linux console, 115200 8N1; PE1 TX -> H1-4, PE0 RX <- H1-2.
+UART1 /dev/ttyS1: F407 debug/logging; PD4 TX -> H1-3, PD3 RX <- H1-1.
+UART2 /dev/ttyS2: K230 reserved; PD13 TX -> H1-9, PD14 RX <- H1-11.
+
+Only ttyS0 has a login console. No getty/logger is automatically started on ttyS2.
+K230 baud rate and message protocol are not selected yet. Example ONLY:
+  stty -F /dev/ttyS2 115200 raw -echo -ixon -ixoff -crtscts
+  cat /dev/ttyS2
+
+Cross TX to peer RX, and RX to peer TX. Do not connect two TX outputs together.
+ESP32-C3 programming UART on H1-6/H1-8 belongs to the ESP, not a fourth F1C UART.
+Power sequencing/isolation between independently powered boards needs hardware review.

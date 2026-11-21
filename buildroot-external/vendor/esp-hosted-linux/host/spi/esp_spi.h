@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * SPDX-FileCopyrightText: 2015-2023 Espressif Systems (Shanghai) CO LTD
+ *
+ */
+
+#ifndef _ESP_SPI_H_
+#define _ESP_SPI_H_
+
+#include "esp.h"
+
+#define SPI_BUF_SIZE            1600
+
+struct gpio_desc;
+
+enum spi_flags_e {
+	ESP_SPI_BUS_CLAIMED,
+	ESP_SPI_BUS_SET,
+	ESP_SPI_GPIO_HS_REQUESTED,
+	ESP_SPI_GPIO_HS_IRQ_DONE,
+	ESP_SPI_GPIO_DR_REQUESTED,
+	ESP_SPI_GPIO_DR_IRQ_DONE,
+	ESP_SPI_DATAPATH_OPEN,
+	ESP_SPI_RESETTING,
+	ESP_SPI_POLL_RUNNING,
+};
+
+struct esp_spi_context {
+	struct esp_adapter          *adapter;
+	struct spi_device           *esp_spi_dev;
+	struct sk_buff_head         tx_q[MAX_PRIORITY_QUEUES];
+	struct sk_buff_head         rx_q[MAX_PRIORITY_QUEUES];
+	struct workqueue_struct     *spi_workqueue;
+	struct work_struct          spi_work;
+	struct work_struct          reset_work;
+	struct delayed_work         poll_work;
+	struct workqueue_struct     *nw_cmd_reinit_workqueue;
+	struct work_struct          nw_cmd_reinit_work;
+	struct gpio_desc            *reset_gpio;
+	struct gpio_desc            *handshake_gpio;
+	struct gpio_desc            *data_ready_gpio;
+	bool                        reset_gpio_driven;
+	int                         handshake_irq;
+	int                         data_ready_irq;
+	u32                         spi_max_hz;
+	uint8_t                     requested_clk_mhz;
+	uint8_t                     spi_clk_mhz;
+	uint8_t                     reserved;
+	unsigned long               spi_flags;
+};
+
+enum {
+	CLOSE_DATAPATH,
+	OPEN_DATAPATH,
+};
+
+
+#endif

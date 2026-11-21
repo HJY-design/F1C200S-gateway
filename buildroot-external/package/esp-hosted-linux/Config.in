@@ -1,0 +1,6 @@
+config BR2_PACKAGE_ESP_HOSTED_LINUX
+	bool "ESP-Hosted Linux SPI kernel module"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Build the pinned Espressif Linux SPI host driver for ESP32-C3.
+	  Matching ESP firmware and the board-specific device tree are required.

@@ -1,0 +1,31 @@
+{
+  "configured": true,
+  "chemistry": "lithium_ion_4_2v",
+  "series_cells": 3,
+  "capacity_mah": 1650,
+  "nominal_mv": 11100,
+  "full_charge_mv": 12600,
+  "specification_source": "User confirmed 3S lithium battery, 1650 mAh, nominal 11.1 V, charge limit 12.6 V",
+  "cell_voltage_soc": [
+    [3300, 0],
+    [3400, 5],
+    [3500, 10],
+    [3600, 15],
+    [3650, 20],
+    [3700, 30],
+    [3750, 40],
+    [3800, 50],
+    [3850, 60],
+    [3900, 70],
+    [3950, 75],
+    [4000, 80],
+    [4050, 85],
+    [4100, 90],
+    [4150, 95],
+    [4200, 100]
+  ],
+  "charge_hint_percent": 20,
+  "curve_source": "https://www.whalebattery.com/blog-detail/lipo-battery-voltage",
+  "curve_scope": "Generic resting-voltage LiPo reference, not calibrated to this battery; the reference's 0-2 percent endpoint is displayed as 0 percent",
+  "estimate_note": "Approximate voltage-based estimate using F407 ADC; load, temperature, cell balance, aging and ADC error affect it. More useful after resting. Capacity is nominal only; no coulomb counting. UI charging hint only, not a discharge cutoff or charging controller."
+}

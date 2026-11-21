@@ -1,0 +1,45 @@
+#!/bin/sh
+# Priorities apply only when choosing a connection. Keep a working connection;
+# do not scan for, or switch to, another ESSID while it remains connected.
+# Retain stalled-connection recovery for the ESP driver.
+run=${GW_WIFI_RUN_DIR:-/run}
+lost_since=
+locked=
+unlocked=0
+while sleep 5; do
+    [ ! -e "$run/gateway-wifi-allowed.ids" ] || [ -s "$run/gateway-wifi-allowed.ids" ] || exit 0
+    state=$(gateway-timeout 5 wpa_cli -i wlan0 status 2>/dev/null)
+    now=$(cut -d. -f1 /proc/uptime)
+    last=$(cat "$run/gateway-wifi-last-recovery" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if ! printf '%s\n' "$state" | grep -q '^wpa_state=COMPLETED$'; then
+        if [ "$unlocked" = 0 ]; then
+            gateway-wifi-enable-configured >/dev/null 2>&1
+            unlocked=1
+            locked=
+        fi
+        [ -n "$lost_since" ] || lost_since=$now
+        # Allow the first retry after 45s, including early boot. Subsequent
+        # retries are rate limited when neither hotspot is available.
+        if [ "$((now - lost_since))" -ge 45 ] && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge 180 ]; }; then
+            # Retain this supervisor even if recovery itself hangs or fails.
+            echo "$now" > "$run/gateway-wifi-last-recovery"
+            gateway-timeout 90 /etc/init.d/S41wifi recover > "$run/gateway-wifi-recover.log" 2>&1
+            result=$?
+            logger -t gateway-wifi "Wi-Fi recovery returned $result; monitor remains active"
+            gateway-event "wifi-recovery-returned status=$result" || :
+        fi
+        continue
+    fi
+    lost_since=
+    unlocked=0
+    id=$(printf '%s\n' "$state" | sed -n 's/^id=//p')
+    case "$id" in ''|*[!0-9]*) continue ;; esac
+    [ "$locked" != "$id" ] || continue
+    list=$(gateway-timeout 5 wpa_cli -i wlan0 list_networks) || continue
+    for candidate in $(printf '%s\n' "$list" | awk 'NR > 1 {print $1}'); do
+        case "$candidate" in ''|*[!0-9]*) continue ;; esac
+        [ "$candidate" = "$id" ] || gateway-timeout 4 wpa_cli -i wlan0 disable_network "$candidate" >/dev/null 2>&1
+    done
+    locked=$id
+done

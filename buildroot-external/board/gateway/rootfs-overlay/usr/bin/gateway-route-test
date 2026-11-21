@@ -1,0 +1,54 @@
+#!/bin/sh
+# Execute an explicitly uploaded F407 waypoint route. No calibration or origin reset.
+set -u
+task_mode=${1:---plan}; task_loops=${2:-5}; task_pause=${3:-1000}
+case "$task_loops:$task_pause" in *[!0-9:]*|:*|*:) exit 2 ;; esac
+[ "$task_loops" -ge 1 ] && [ "$task_loops" -le 10 ] && [ "$task_pause" -le 10000 ] || exit 2
+case "$task_mode" in
+    --plan) printf '{"motion_executed":false,"loops":%s,"pause_ms":%s,"odometry_reset":false}\n' "$task_loops" "$task_pause"; exit 0 ;;
+    --run) [ "$task_pause" = 1000 ] || exit 2; exec gateway supervise vehicle route "$task_loops" ;;
+    --locked) ;;
+    *) exit 2 ;;
+esac
+[ -e /proc/$$/fd/9 ] || { echo 'native route supervisor required' >&2; exit 1; }
+task_lock=/run/gateway-vehicle-test.lock
+mkdir "$task_lock" 2>/dev/null || { echo 'vehicle test already active' >&2; exit 1; }
+task_dir=/data/tests/cruise-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$task_dir" || { rmdir "$task_lock"; exit 1; }
+if [ -n "${GATEWAY_ROUTE_JOBFILE:-}" ]; then printf '%s\n' "$task_dir" > "$GATEWAY_ROUTE_JOBFILE"; fi
+task_stopped=0 task_result=interrupted
+mono() { read -r task_up task_rest < /proc/uptime; printf '%s\n' "${task_up%%.*}"; }
+finish() {
+    if [ "$task_stopped" != 1 ]; then gateway mcu drive.stop > "$task_dir/stop-reply.json" 2>> "$task_dir/errors.log" || :; fi
+    printf '{"state":"%s","directory":"%s","loops":%s,"pause_ms":%s,"odometry_reset":false,"stop_confirmed_by_reply":%s}\n' "$task_result" "$task_dir" "$task_loops" "$task_pause" "$task_stopped" > "$task_dir/result.json"
+    sync; rm -f "$task_lock/pid"; rmdir "$task_lock"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM HUP
+printf '%s\n' "$$" > "$task_lock/pid"
+gateway mcu drive.get > "$task_dir/preflight.json" || exit 1
+grep -q '"available":true' "$task_dir/preflight.json" && grep -q '"ready":true' "$task_dir/preflight.json" && grep -q '"armed":false' "$task_dir/preflight.json" && grep -Eq '"loaded_points":[1-9]' "$task_dir/preflight.json" || { task_result=not_ready; exit 1; }
+[ ! -e /data/tests/next-route.json ] || cp /data/tests/next-route.json "$task_dir/plan.json"
+gateway mcu drive.arm > "$task_dir/arm.json" || exit 1
+if [ -n "${GATEWAY_PLANNED_TOKEN:-}" ]; then
+    case "$GATEWAY_PLANNED_TOKEN" in *[!0-9]*|'') exit 2 ;; esac
+    gateway mcu drive.test plan.run "$GATEWAY_PLANNED_TOKEN" "$task_loops" "$task_pause" > "$task_dir/start.json" || exit 1
+else
+    gateway mcu drive.test route.run "$task_loops" "$task_pause" > "$task_dir/start.json" || exit 1
+fi
+task_started=$(mono)
+while [ $(( $(mono)-task_started )) -lt 610 ]; do
+    [ ! -f "$task_dir/stop" ] || { task_result=stopped; exit 0; }
+    task_rc=0
+    gateway supervise drive > "$task_dir/latest.json.tmp" 2>> "$task_dir/errors.log" || task_rc=$?
+    mv "$task_dir/latest.json.tmp" "$task_dir/latest.json"
+    printf '{"utc":"%s","sample":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$task_dir/latest.json")" >> "$task_dir/samples.jsonl"
+    if grep -q '"armed":false' "$task_dir/latest.json"; then
+        task_stopped=1
+        if grep -q '"reason":"completed"' "$task_dir/latest.json"; then task_result=completed; exit 0; fi
+        task_result=controller_stopped; exit 1
+    fi
+    [ "$task_rc" = 0 ] || { task_result=heartbeat_failed; exit 1; }
+    sleep 0.1
+done
+task_result=timeout; exit 1

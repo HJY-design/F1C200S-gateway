@@ -1,0 +1,16 @@
+#!/bin/sh
+pid=/run/gateway-health.pid
+case "${1:-}" in
+  start)
+    rm -f /run/gateway-health.paused
+    grep -F -x -q '::respawn:/usr/bin/gateway-health' /etc/inittab && exit 0
+    if [ -s "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null; then exit 0; fi
+    start-stop-daemon -S -q -b -m -p "$pid" -x /usr/bin/gateway-health
+    ;;
+  stop)
+    # Keep the init-owned supervisor idle during an intentional shutdown.
+    : > /run/gateway-health.paused
+    ;;
+  restart) "$0" stop; "$0" start ;;
+  *) exit 2 ;;
+esac

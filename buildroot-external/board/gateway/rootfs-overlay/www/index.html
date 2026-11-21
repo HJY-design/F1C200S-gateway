@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="F1C200S 网关：独立串口记录、日志下载与 STM32 烧录">
+  <script>if(location.hostname==='f1c200s-gateway.local')location.replace('/cgi-bin/index.cgi'+location.hash);</script>
+  <title>F1C200S 网关</title><link rel="stylesheet" href="/style.css?v=1.1.3"><script defer src="/log-text.js?v=20261024-raw1"></script><script defer src="/app.js?v=20261029-f407"></script><script defer src="/backend.js?v=20261029-f407"></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="#status"><span class="brand-icon">G</span><span>工创网关<small>F1C200S · ESP32-C3</small></span></a>
+  <nav aria-label="功能导航">
+    <button data-page="status" class="nav active">设备状态</button>
+    <button data-page="logs" class="nav">串口日志</button>
+    <button data-page="flash" class="nav">固件烧录</button>
+    <button data-page="settings" class="nav">记录设置</button>
+    <button data-page="profiles" class="nav">F407 参数组</button>
+    <button data-page="backend" class="nav">后台接口</button>
+  </nav>
+  <div class="sidebar-foot"><span class="dot" id="online-dot"></span><span id="connection">正在连接</span><small id="address">局域网 HTTP</small></div>
+</aside>
+<main>
+  <header><div><p class="eyebrow">GATEWAY / 本体控制台</p><h1 id="page-title">设备状态</h1></div><div class="header-right"><span id="clock">等待设备时间</span><button id="refresh" class="secondary">刷新</button></div></header>
+  <div id="notice" role="status" hidden></div>
+  <section id="page-status" class="page">
+    <div class="banner"><span class="dot" id="logger-dot"></span><div><strong id="logger-title">读取日志服务状态</strong><p>日志由板子独立记录。关闭网页或电脑离线后，仍继续写入 Flash。</p></div></div>
+    <div class="metrics">
+      <article class="card"><span class="label">网络地址</span><strong class="metric" id="stat-ip">—</strong><small id="stat-wifi">—</small></article>
+      <article class="card"><span class="label">本次运行</span><strong class="metric" id="stat-uptime">—</strong><small id="stat-time">—</small></article>
+      <article class="card"><span class="label">Flash 可用</span><strong class="metric" id="stat-flash">—</strong><div class="meter"><i id="flash-meter"></i></div><small id="stat-storage">—</small></article>
+      <article class="card"><span class="label">内存可用</span><strong class="metric" id="stat-ram">—</strong><small id="stat-load">—</small></article>
+    </div>
+    <div class="two-col">
+      <article class="card uart-card"><div class="card-title"><h2>UART 1</h2><span class="tag" id="uart1-baud">—</span></div><strong class="counter" id="uart1-rx">—</strong><span class="label">本次接收字节</span><p id="uart1-details">—</p><p class="error" id="uart1-error"></p><button class="secondary" data-log-port="1">查看 UART 1 日志</button></article>
+      <article class="card uart-card"><div class="card-title"><h2>UART 2</h2><span class="tag" id="uart2-baud">—</span></div><strong class="counter" id="uart2-rx">—</strong><span class="label">本次接收字节</span><p id="uart2-details">—</p><p class="error" id="uart2-error"></p><button class="secondary" data-log-port="2">查看 UART 2 日志</button></article>
+    </div>
+    <article class="card"><div class="card-title"><h2>已连接设备</h2><span class="label">USB Host / 目标控制</span></div><pre id="device-info" class="compact">—</pre></article>
+    <article class="card"><div class="card-title"><h2>远程控制</h2><button class="secondary" id="gpio-reset">发送 F4 复位脉冲</button></div><div class="two-col gpio-controls"><div><strong>F4RESET · PD5 / H1-7</strong><p id="gpio-nrst-state" class="muted">状态待读取</p><div class="toolbar"><button class="secondary" data-gpio-command="reset-low">拉低复位线</button><button class="secondary" data-gpio-command="reset-release">释放复位线</button></div></div><div><strong>F4BOOT · PD6 / H1-15</strong><p id="gpio-boot-state" class="muted">状态待读取</p><div class="toolbar"><button class="secondary" data-gpio-command="boot-low">BOOT0 低电平</button><button class="secondary" data-gpio-command="boot-high">BOOT0 高电平</button></div></div></div><p class="muted">复位线采用开漏：拉低或释放，释放后由目标板上拉。这里控制 F4 接口，目标是否复位需结合实际接线与运行效果确认。</p><hr><strong>USB-EN · PD7</strong><p id="usb-power-state" class="muted">状态待读取</p><div class="toolbar"><button class="secondary" data-usb-state="on">开启 USB 供电</button><button class="secondary" data-usb-state="off">关闭 USB 供电</button></div><p class="muted">关闭后 USB 外设会断电并断开，依靠 USB 供电的目标板也会停机；烧录期间禁止切换。</p></article>
+  </section>
+  <section id="page-logs" class="page" hidden>
+    <div class="toolbar"><label>串口 <select id="log-port"><option value="0">全部串口</option><option value="1">UART 1</option><option value="2">UART 2</option></select></label><label class="check"><input type="checkbox" id="log-auto" checked>自动刷新</label><span class="muted" id="log-count">—</span></div>
+    <div class="log-layout"><article class="card file-card"><h2>日志文件</h2><div id="log-list" class="file-list"></div><div class="pager"><button id="files-prev" class="secondary">上一页</button><button id="files-next" class="secondary">下一页</button></div></article>
+    <article class="card viewer-card"><div class="card-title"><h2 id="log-name">选择日志文件</h2><div class="segmented"><button id="view-text" class="selected">文本</button><button id="view-hex">HEX</button></div></div><p class="muted" id="log-meta">导出完整文件并自动合入时间戳；文本与 HEX 两种格式均可直接阅读。</p><div class="toolbar"><a id="download-text" class="button secondary disabled">导出文本日志</a><a id="download-hex" class="button secondary disabled">导出 HEX 日志</a><button id="log-delete" class="secondary danger" disabled>删除此日志</button><label class="check" title="仅切换当前视图；导出文件仍包含时间戳。"><input type="checkbox" id="log-timestamps" checked>显示时间戳</label></div><div id="delete-confirm" class="banner neutral" hidden><div><strong>删除此文件的原始字节、时间戳与文件信息？</strong><p>删除后无法恢复；后续串口记录继续保留。</p><div class="toolbar"><button id="delete-confirm-yes" class="danger">确认删除</button><button id="delete-confirm-no" class="secondary">取消</button></div></div></div><pre id="log-view" tabindex="0">暂无选中的日志。</pre><div class="pager"><button id="view-prev" class="secondary">上一段</button><span id="view-range" class="muted">—</span><button id="view-next" class="secondary">下一段</button><button id="view-tail" class="secondary">最新一段</button></div></article></div>
+  </section>
+  <section id="page-flash" class="page" hidden>
+    <div class="two-col"><article class="card"><h2>烧录 HEX / ELF 固件</h2><p class="muted">通过网关上的 ST-Link 写入目标，完成后校验并复位运行。</p><form id="flash-form"><label>目标型号<select id="flash-target"><option value="f103">STM32F103C8T6 · 64 KiB</option><option value="f407">STM32F407 · 最大 1 MiB</option></select></label><label>固件文件<input type="file" id="flash-file" accept=".hex,.elf" required></label><p id="flash-file-info" class="muted">请选择 .HEX 或 .ELF 文件，最大 4 MiB。</p><button id="flash-submit" type="submit">开始烧录并校验</button></form></article><article class="card"><div class="card-title"><h2>任务结果</h2><span class="tag" id="job-state">尚无任务</span></div><p id="job-summary" class="muted">烧录成功以设备校验结果为准。</p><p class="hash" id="job-hash"></p><pre id="job-output" class="job-output">等待烧录任务。</pre></article></div>
+    <article class="card"><div class="card-title"><h2>烧录记录</h2><span class="label">最近 64 次 · 保存在 Flash</span></div><div class="table-wrap"><table><thead><tr><th>文件 / 校验值</th><th>目标</th><th>时间</th><th>结果</th></tr></thead><tbody id="job-list"></tbody></table></div></article>
+  </section>
+  <section id="page-settings" class="page" hidden>
+    <div class="two-col"><article class="card"><h2>日志保留策略</h2><p class="muted">保存到板子后，电脑断开也继续按此策略执行。</p><form id="settings-form"><label>保留方式<select id="retention-mode"><option value="files">按日志文件数</option><option value="bytes">按总容量</option><option value="none">不自动删除</option></select></label><label id="files-label">每个串口保留文件数<input id="retention-files" type="number" min="1" max="1000" value="10" required></label><label id="bytes-label" hidden>两个串口合计容量（MiB）<input id="retention-mib" type="number" min="4" max="80" value="32" required></label><p id="retention-note" class="muted">每次启动收到数据、或日志自动分段时形成新文件；超出数量后删除最旧文件。</p><div class="two-fields"><label>UART 1 波特率<select id="baud1"></select></label><label>UART 2 波特率<select id="baud2"></select></label></div><button type="submit">保存记录设置</button></form></article><article class="card"><h2>记录与时间</h2><dl><dt>文件分段</dt><dd>约 512 KiB，包含原始数据与时间戳索引</dd><dt>写入缓冲</dt><dd>约 1 秒合并写入，约 5 秒同步到 Flash；突然断电可能丢失最后一小段。</dd><dt>时间来源</dt><dd>联网后自动同步。校时前保留“启动后时间”与启动编号。</dd><dt>剩余空间</dt><dd>Flash 可用空间低于 8 MiB 时暂停记录并显示丢弃计数，避免系统空间耗尽。</dd></dl></article></div>
+  </section>
+  <section id="page-profiles" class="page" hidden>
+    <div class="banner neutral"><div><strong>F407 参数读写</strong><p>写入后从主控读回确认。参数组保存在网关；需要主控断电后保留时，另点“保存到 F407 Flash”。</p></div></div>
+    <article class="card"><div class="card-title"><h2>主控当前参数</h2><button id="f407-param-read" class="secondary">读取当前参数</button></div><p id="f407-param-state" class="muted">进入本页后读取主控实际值。</p><form id="f407-param-form"><div class="two-fields"><label>参数<select id="f407-param-key" required></select></label><label>整数值<input id="f407-param-value" type="number" step="1" min="-2147483648" max="2147483647" required></label></div><div class="toolbar"><button type="submit">写入并读回</button><button id="f407-param-save" type="button" class="secondary">保存到 F407 Flash</button><button id="f407-param-rollback" type="button" class="secondary">恢复上次 Flash 参数</button></div></form><pre id="f407-param-json" class="backend-json">尚未读取。</pre></article>
+    <div class="two-col"><article class="card"><h2>保存参数组</h2><form id="profile-form"><label>名称<input id="profile-name" maxlength="64" placeholder="例如：低速调试" required></label><label>参数（JSON 对象）<textarea id="profile-values" rows="9" spellcheck="false">{
+  "wheel2.kp_milli": 0,
+  "wheel3.kp_milli": 0,
+  "telemetry_ms": 500
+}</textarea></label><button type="submit">保存到网关</button></form></article><article class="card"><div class="card-title"><h2>已保存的组</h2><button id="profile-restore" class="secondary">恢复上一组</button></div><p id="profile-current" class="muted">尚未选择参数组。</p><div id="profile-list"></div></article></div>
+  </section>
+  <section id="page-backend" class="page" hidden>
+    <div class="banner neutral"><div><strong>网页与 SSH / CLI 使用同一套后台</strong><p>记录接口启用后的操作、时间与执行结果。自动检查新增记录，已读取的历史保存在浏览器缓存；页面关闭后，网关继续执行和记录。</p></div></div>
+    <div class="toolbar"><label class="check"><input type="checkbox" id="backend-auto" checked>自动检查新记录</label><button id="backend-refresh" class="secondary">检查新记录</button><button id="backend-older" class="secondary">读取较早记录</button><span class="muted" id="backend-cache-state">尚未读取操作记录</span></div>
+    <div class="log-layout backend-layout"><article class="card file-card"><h2>接口操作记录</h2><div id="backend-activity-list" class="file-list"></div><p class="muted">网关保留最近 64 条；访问通道区分 SSH / CLI、HTTP 和后台任务。</p></article><article class="card viewer-card"><div class="card-title"><h2 id="backend-activity-title">选择操作记录</h2><span class="tag" id="backend-activity-result">—</span></div><p class="muted" id="backend-activity-time">点击记录查看参数与结果。</p><pre class="backend-json" id="backend-activity-json">尚未选择记录。</pre></article></div>
+    <article class="card"><div class="card-title"><h2>读取接口数据</h2><span class="label" id="backend-data-time">按需读取 · 保留上次结果</span></div><div class="toolbar"><label>命令<select id="backend-command"><option value="diagnose">gateway diagnose · 综合诊断</option><option value="status">gateway status</option><option value="capabilities">gateway capabilities</option><option value="mcu-cached">F407 状态 / 惯导缓存</option><option value="param-get">gateway param get · F407 实际参数</option><option value="uart1">gateway log uart1 · 最新 512 字节</option><option value="uart2">gateway log uart2 · 最新 512 字节</option><option value="jobs">gateway jobs</option><option value="test">gateway test run</option></select></label><button id="backend-read">读取一次</button></div><p class="muted">这里按需读取数据。复位、BOOT0 和 USB 供电在设备状态页控制；烧录在固件烧录页执行。F407 的实际参数读写在“F407 参数组”页执行，结果也会保留在接口记录中。</p><pre class="backend-json" id="backend-data-json">尚未读取。选中命令后点击“读取一次”。</pre></article>
+  </section>
+  <footer>F1C200S 网关 <span>局域网 HTTP · 页面关闭不影响记录</span></footer>
+</main>
+<script src="f407.js?v=20261029-battery2"></script>
+</body></html>

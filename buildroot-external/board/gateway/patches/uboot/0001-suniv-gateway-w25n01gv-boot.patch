@@ -1,0 +1,341 @@
+From: Gateway board adaptation <local-build@localhost>
+Subject: [PATCH] suniv: custom W25N01GV gateway SPL reader
+
+For this board only: fixed 1KiB ROM payload/page, bounded read waits, W25N01GV
+JEDEC ID, internal ECC status, and bad-block skipping within the 4MiB boot area.
+Keep the unselected upstream NOR path. Enable using the board config fragment.
+The 1KiB SUNIV page convention follows Icenowy Zheng's published 2022 proposal:
+https://www.mail-archive.com/linux-sunxi@googlegroups.com/msg35536.html
+Command constants come from the Winbond W25N01GV Rev G data sheet.
+This is a local board adaptation, not an upstream patch or a hardware test result.
+
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -1102,6 +1102,14 @@
+ 	  sunxi SPI Flash. It uses the same method as the boot ROM, so does
+ 	  not need any extra configuration.
+ 
++config SPL_SPI_SUNXI_GATEWAY_NAND
++	bool "Custom SUNIV gateway W25N01GV boot"
++	depends on SPL_SPI_SUNXI && MACH_SUNIV
++	help
++	  Board-specific W25N01GV reader with ECC and factory-bad-block checks.
++	  SPL and U-Boot must both use 1024-byte payloads in 2048-byte pages.
++	  The first 4 MiB are reserved for boot; block 0 must be good.
++
+ config PINE64_DT_SELECTION
+ 	bool "Enable Pine64 device tree selection code"
+ 	depends on MACH_SUN50I
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -226,8 +226,9 @@
+ 		return SUNXI_BOOTED_FROM_SPI;
+ 	case SUNIV_BOOTED_FROM_MMC1:
+ 		return SUNXI_BOOTED_FROM_MMC2;
+-	/* SPI NAND is not supported yet. */
+ 	case SUNIV_BOOTED_FROM_NAND:
++		if (IS_ENABLED(CONFIG_SPL_SPI_SUNXI_GATEWAY_NAND))
++			return SUNXI_BOOTED_FROM_SPI;
+ 		return SUNXI_INVALID_BOOT_SOURCE;
+ 	}
+ 	/* If we get here something went wrong try to boot from FEL.*/
+diff --git a/arch/arm/mach-sunxi/spl_spi_sunxi.c b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+--- a/arch/arm/mach-sunxi/spl_spi_sunxi.c
++++ b/arch/arm/mach-sunxi/spl_spi_sunxi.c
+@@ -322,7 +322,7 @@
+ 	udelay(1);
+ }
+ 
+-static void spi0_read_data(void *buf, u32 addr, u32 len)
++static void __maybe_unused spi0_read_data(void *buf, u32 addr, u32 len)
+ {
+ 	u8 *buf8 = buf;
+ 	u32 chunk_len;
+@@ -361,11 +361,51 @@
+ 	}
+ }
+ 
++#ifdef CONFIG_SPL_SPI_SUNXI_GATEWAY_NAND
++static int gateway_spi_xfer(const u8 *tx, u32 txlen, u8 *rx, u32 rxlen)
++{
++	uintptr_t base = spi0_base_address();
++	u32 i, total = txlen + rxlen;
++
++	if (!total || total > 64)
++		return -EINVAL;
++	writel(total, base + SUN6I_SPI0_MBC);
++	writel(txlen, base + SUN6I_SPI0_MTC);
++	writel(txlen, base + SUN6I_SPI0_BCC);
++	for (i = 0; i < txlen; i++)
++		writeb(tx[i], base + SUN6I_SPI0_TXD);
++	setbits_le32(base + SUN6I_SPI0_TCR, SUN6I_TCR_XCH);
++	for (i = 0; i < 10000; i++) {
++		if ((readl(base + SUN6I_SPI0_FIFO_STA) & 0x7f) >= total)
++			break;
++		udelay(1);
++	}
++	if (i == 10000)
++		return -ETIMEDOUT;
++	for (i = 0; i < txlen; i++)
++		readb(base + SUN6I_SPI0_RXD);
++	for (i = 0; i < rxlen; i++)
++		rx[i] = readb(base + SUN6I_SPI0_RXD);
++	udelay(1); /* CS high time before the next command. */
++	return 0;
++}
++
++#include "gateway_spinand_spl.h"
++#endif
++
+ static ulong spi_load_read(struct spl_load_info *load, ulong sector,
+ 			   ulong count, void *buf)
+ {
++#ifdef CONFIG_SPL_SPI_SUNXI_GATEWAY_NAND
++	int ret = gn_read(buf, sector, count);
++
++	if (ret) {
++		printf("W25N01GV read error %d at 0x%lx\n", ret, sector);
++		return 0;
++	}
++#else
+ 	spi0_read_data(buf, sector, count);
+-
++#endif
+ 	return count;
+ }
+ 
+@@ -383,7 +423,17 @@
+ 
+ 	spi0_init();
+ 
+-	spi0_read_data((void *)header, load_offset, 0x40);
++#ifdef CONFIG_SPL_SPI_SUNXI_GATEWAY_NAND
++	ret = gn_init();
++	if (ret) {
++		printf("W25N01GV init error %d\n", ret);
++		goto out;
++	}
++#endif
++	if (spi_load_read(NULL, load_offset, 0x40, header) != 0x40) {
++		ret = -EIO;
++		goto out;
++	}
+ 
+         if (IS_ENABLED(CONFIG_SPL_LOAD_FIT) &&
+ 		image_get_magic(header) == FDT_MAGIC) {
+@@ -396,12 +446,14 @@
+ 	} else {
+ 		ret = spl_parse_image_header(spl_image, bootdev, header);
+ 		if (ret)
+-			return ret;
+-
+-		spi0_read_data((void *)spl_image->load_addr,
+-			       load_offset, spl_image->size);
+-	}
+-
++			goto out;
++
++		if (spi_load_read(NULL, load_offset, spl_image->size,
++				  (void *)spl_image->load_addr) != spl_image->size)
++			ret = -EIO;
++	}
++
++out:
+ 	spi0_deinit();
+ 
+ 	return ret;
+diff --git a/arch/arm/mach-sunxi/gateway_spinand_spl.h b/arch/arm/mach-sunxi/gateway_spinand_spl.h
+--- /dev/null
++++ b/arch/arm/mach-sunxi/gateway_spinand_spl.h
+@@ -0,0 +1,189 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Board-specific W25N01GV reader. SUNIV ROM uses 1024 payload bytes/page;
++ * both SPL and U-Boot are packed with the same convention by make-nand-images.py.
++ * Protocol: Winbond W25N01GV Rev G, sections 7.2-7.3, 8.2.2/3/7/14/15.
++ * The fixed-page SUNIV approach follows Icenowy Zheng's October 2022 proposal.
++ * gateway_spi_xfer() and udelay() must be provided by the including source.
++ */
++#ifndef GATEWAY_SPINAND_SPL_H
++#define GATEWAY_SPINAND_SPL_H
++
++#define GN_PAYLOAD_PAGE 1024U
++#define GN_PHYSICAL_PAGE 2048U
++#define GN_PAGES_PER_BLOCK 64U
++#define GN_BOOT_BLOCKS 32U /* First 4 MiB only; never cross into kernel. */
++#define GN_WAIT_POLLS 10000U
++
++static u8 gn_blocks[GN_BOOT_BLOCKS]; /* 0 unknown, 1 good, 2 bad */
++static u32 gn_cached_page = ~0U;
++static u8 gn_cached_status;
++
++static int gn_feature(u8 reg, u8 *value)
++{
++	u8 tx[] = { 0x0f, reg };
++
++	return gateway_spi_xfer(tx, sizeof(tx), value, 1);
++}
++
++static int gn_wait(u8 *status)
++{
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < GN_WAIT_POLLS; i++) {
++		ret = gn_feature(0xc0, status);
++		if (ret)
++			return ret;
++		if (!(*status & 1))
++			return 0;
++		udelay(1);
++	}
++	return -ETIMEDOUT;
++}
++
++static int gn_page(u32 page)
++{
++	u8 tx[] = { 0x13, page >> 16, page >> 8, page };
++	int ret;
++
++	if (page == gn_cached_page)
++		return 0;
++	gn_cached_page = ~0U;
++	ret = gateway_spi_xfer(tx, sizeof(tx), NULL, 0);
++	if (ret)
++		return ret;
++	ret = gn_wait(&gn_cached_status);
++	if (!ret)
++		gn_cached_page = page;
++	return ret;
++}
++
++static int gn_cache(u32 column, u8 *buf, u32 len)
++{
++	u8 tx[] = { 0x03, column >> 8, column, 0x00 };
++
++	return gateway_spi_xfer(tx, sizeof(tx), buf, len);
++}
++
++static int gn_bad(u32 block)
++{
++	u8 marker;
++	int ret;
++
++	if (gn_blocks[block])
++		return gn_blocks[block] == 2;
++	ret = gn_page(block * GN_PAGES_PER_BLOCK);
++	if (ret)
++		return ret;
++	/* Reserved OOB byte 0 is the factory BBM; ignore data ECC for this scan. */
++	ret = gn_cache(GN_PHYSICAL_PAGE, &marker, 1);
++	if (ret)
++		return ret;
++	gn_blocks[block] = marker == 0xff ? 1 : 2;
++	return marker != 0xff;
++}
++
++static int gn_init(void)
++{
++	u8 reset = 0xff, id_cmd[] = { 0x9f, 0x00 }, id[3];
++	u8 cfg, status, tx[3];
++	int ret;
++
++	memset(gn_blocks, 0, sizeof(gn_blocks));
++	gn_cached_page = ~0U;
++	/* On a warm reset, let an outstanding program/erase finish first. */
++	ret = gn_wait(&status);
++	if (ret)
++		return ret;
++	ret = gateway_spi_xfer(&reset, 1, NULL, 0);
++	if (ret)
++		return ret;
++	/* RESET tRST is 500 us maximum; give it time before polling BUSY. */
++	udelay(500);
++	ret = gn_wait(&status);
++	if (ret)
++		return ret;
++	ret = gateway_spi_xfer(id_cmd, sizeof(id_cmd), id, sizeof(id));
++	if (ret)
++		return ret;
++	if (id[0] != 0xef || id[1] != 0xaa || id[2] != 0x21)
++		return -ENODEV;
++	ret = gn_feature(0xb0, &cfg);
++	if (ret)
++		return ret;
++	/* Preserve OTP/lock bits, enable internal ECC and buffer-read mode. */
++	tx[0] = 0x1f;
++	tx[1] = 0xb0;
++	tx[2] = cfg | 0x18;
++	ret = gateway_spi_xfer(tx, sizeof(tx), NULL, 0);
++	if (ret)
++		return ret;
++	ret = gn_wait(&status);
++	if (ret)
++		return ret;
++	ret = gn_feature(0xb0, &cfg);
++	if (ret)
++		return ret;
++	if ((cfg & 0x18) != 0x18 || (cfg & 0x40))
++		return -EIO; /* OTP access must be off. */
++	ret = gn_bad(0);
++	/* This image starts at block 0. ROM recovery on a bad block 0 is untested. */
++	return ret > 0 ? -EIO : ret;
++}
++
++static int gn_map(u32 logical_page, u32 *physical_page)
++{
++	u32 ordinal = logical_page / GN_PAGES_PER_BLOCK, block;
++	int bad;
++
++	for (block = 0; block < GN_BOOT_BLOCKS; block++) {
++		bad = gn_bad(block);
++		if (bad < 0)
++			return bad;
++		if (bad)
++			continue;
++		if (!ordinal) {
++			*physical_page = block * GN_PAGES_PER_BLOCK +
++					logical_page % GN_PAGES_PER_BLOCK;
++			return 0;
++		}
++		ordinal--;
++	}
++	return -ENOSPC;
++}
++
++static int gn_read(u8 *buf, u32 addr, u32 len)
++{
++	u32 page, column, chunk;
++	int ret;
++
++	if (addr > GN_BOOT_BLOCKS * GN_PAGES_PER_BLOCK * GN_PAYLOAD_PAGE ||
++	    len > GN_BOOT_BLOCKS * GN_PAGES_PER_BLOCK * GN_PAYLOAD_PAGE - addr)
++		return -ENOSPC;
++	while (len) {
++		ret = gn_map(addr / GN_PAYLOAD_PAGE, &page);
++		if (ret)
++			return ret;
++		ret = gn_page(page);
++		if (ret)
++			return ret;
++		/* 10 = uncorrectable; 11 = invalid in buffer mode. Both fail closed. */
++		if (gn_cached_status & 0x20)
++			return -EBADMSG;
++		column = addr % GN_PAYLOAD_PAGE;
++		chunk = GN_PAYLOAD_PAGE - column;
++		if (chunk > 60)
++			chunk = 60; /* Controller FIFO: four command bytes + <=60 data. */
++		if (chunk > len)
++			chunk = len;
++		ret = gn_cache(column, buf, chunk);
++		if (ret)
++			return ret;
++		buf += chunk;
++		addr += chunk;
++		len -= chunk;
++	}
++	return 0;
++}
++#endif

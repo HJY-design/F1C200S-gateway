@@ -1,0 +1,30 @@
+From: Gateway bring-up
+Subject: [PATCH] suniv: retain proven 96MHz DRAM and return FEL before DRAM stack
+
+The board boots U-Boot and Linux at 96MHz. 132/156MHz did not start U-Boot proper in these tests. Use mainline DRAM initialization with conservative clock. Keep FEL return before the SPL stack relocation.
+
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -478,6 +478,11 @@
+ 	i2c_init(CONFIG_SYS_I2C_SPEED, CONFIG_SYS_I2C_SLAVE);
+ #endif
+ 	sunxi_board_init();
++
++	/* FEL DDR setup must return before moving the SPL stack to DRAM. */
++	if (IS_ENABLED(CONFIG_MACH_SUNIV) &&
++	    sunxi_get_boot_device() == BOOT_DEVICE_BOARD)
++		return_to_fel(fel_stash.sp, fel_stash.lr);
+ }
+ #endif /* CONFIG_XPL_BUILD */
+ 
+--- a/arch/arm/mach-sunxi/dram_suniv.c
++++ b/arch/arm/mach-sunxi/dram_suniv.c
+@@ -55,7 +55,7 @@
+ 
+ struct dram_para suniv_dram_para = {
+ 	.size = 32,
+-	.clk = 156,
++	.clk = 96,
+ 	.access_mode = 1,
+ 	.cs_num = 1,
+ 	.ddr8_remap = 0,

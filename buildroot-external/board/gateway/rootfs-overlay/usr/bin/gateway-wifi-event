@@ -1,0 +1,37 @@
+#!/bin/sh
+# wpa_cli action callback: an ESSID change can also change the DHCP subnet.
+[ "${1:-}" = wlan0 ] || exit 0
+run=${GW_WIFI_RUN_DIR:-/run}
+state=$(gateway-timeout 5 wpa_cli -i wlan0 status 2>/dev/null)
+case "${2:-}" in
+    DISCONNECTED)
+        # Ignore an old disconnect callback if a new connection is already up.
+        printf '%s\n' "$state" | grep -q '^wpa_state=COMPLETED$' && exit 0
+        gateway-wifi-enable-configured >/dev/null 2>&1
+        exit 0
+        ;;
+    CONNECTED)
+        printf '%s\n' "$state" | grep -q '^wpa_state=COMPLETED$' || exit 0
+        current=$(printf '%s\n' "$state" | sed -n 's/^id=//p')
+        case "$current" in ''|*[!0-9]*) exit 0 ;; esac
+        # Runtime-only: keep this ESSID until it disconnects. Saved priorities
+        # are unchanged and apply again at the next connection attempt.
+        list=$(gateway-timeout 5 wpa_cli -i wlan0 list_networks) || exit 1
+        for id in $(printf '%s\n' "$list" | awk 'NR > 1 {print $1}'); do
+            case "$id" in ''|*[!0-9]*) continue ;; esac
+            [ "$id" = "$current" ] || gateway-timeout 4 wpa_cli -i wlan0 disable_network "$id" >/dev/null 2>&1
+        done
+        ;;
+    *) exit 0 ;;
+esac
+pid=$(cat "$run/gateway-dhcp.pid" 2>/dev/null)
+case "$pid" in ''|*[!0-9]*) pid= ;; esac
+if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = udhcpc ] && kill -0 "$pid" 2>/dev/null; then
+    # BusyBox documents USR2=release and USR1=renew. Release the old subnet first.
+    kill -USR2 "$pid" 2>/dev/null || exit 1
+    sleep 1
+    kill -USR1 "$pid" 2>/dev/null || exit 1
+else
+    gateway-timeout 15 udhcpc -b -i wlan0 -p "$run/gateway-dhcp.pid" -t 3 -T 3 || exit 1
+fi
+logger -t gateway-wifi 'Wi-Fi connected; DHCP lease refresh requested'

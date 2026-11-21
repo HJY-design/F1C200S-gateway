@@ -1,0 +1,56 @@
+#!/bin/sh
+# Plan by default; --run is an explicit physical-motion command.
+set -u
+task_mode=${1:---plan}; task_outbound=${2:-2000}; task_return=${3:-2000}
+if [ "$task_mode" = --locked ] && [ "$task_outbound" = route ]; then exec /usr/bin/gateway-route-test --locked "$task_return" 1000; fi
+if [ "$task_mode" = --locked ] && [ "$task_outbound" = sequence ]; then exec /usr/bin/gateway-route-sequence --locked "$task_return"; fi
+if [ "$task_mode" = --straight ]; then task_mode=--run; task_return=0; fi
+case "$task_mode" in --plan|--run|--locked) ;; *) echo 'gateway-vehicle-test --plan|--run OUT_MM RETURN_MM | --straight OUT_MM' >&2; exit 2 ;; esac
+case "$task_outbound:$task_return" in *[!0-9:]*|:*|*:) exit 2 ;; esac
+[ "$task_outbound" -ge 100 ] && [ "$task_outbound" -le 3000 ] && { [ "$task_return" = 0 ] || { [ "$task_return" -ge 100 ] && [ "$task_return" -le 3000 ]; }; } || exit 2
+if [ "$task_mode" = --plan ]; then
+    if [ "$task_return" = 0 ]; then
+        printf '{"motion_executed":false,"frame":"relative_to_start","outbound_mm":%s,"return_mm":0,"points_mm_mdeg":[[%s,0,0]],"stop_at_endpoint":true}\n' "$task_outbound" "$task_outbound"
+        exit 0
+    fi
+    printf '{"motion_executed":false,"frame":"relative_to_start","outbound_mm":%s,"return_mm":%s,"points_mm_mdeg":[[%s,0,0],[%s,0,180000],[%s,0,180000]],"requires":"calibrated geometry, axes, PID, motor signs and cleared reference-point bounds"}\n' "$task_outbound" "$task_return" "$task_outbound" "$task_outbound" "$((task_outbound-task_return))"
+    exit 0
+fi
+if [ "$task_mode" = --run ]; then exec gateway supervise vehicle "$task_outbound" "$task_return"; fi
+# The native supervisor holds a shared Flash/reset lock on inherited fd9
+# throughout this script; target programming is excluded while wheels run.
+[ -e /proc/$$/fd/9 ] || { echo 'native vehicle supervisor required' >&2; exit 1; }
+task_lock=/run/gateway-vehicle-test.lock
+mkdir "$task_lock" 2>/dev/null || { echo 'vehicle test already active' >&2; exit 1; }
+task_dir=/data/tests/vehicle-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$task_dir" || { rmdir "$task_lock"; exit 1; }
+task_stopped=0 task_result=interrupted
+mono() { read -r task_up task_rest < /proc/uptime; printf '%s\n' "${task_up%%.*}"; }
+finish() {
+    if [ "$task_stopped" != 1 ]; then gateway mcu drive.stop > "$task_dir/stop-reply.json" 2>> "$task_dir/errors.log" || :; fi
+    printf '{"state":"%s","directory":"%s","outbound_mm":%s,"return_mm":%s,"stop_confirmed_by_reply":%s}\n' "$task_result" "$task_dir" "$task_outbound" "$task_return" "$task_stopped" > "$task_dir/result.json"
+    sync; rm -f "$task_lock/pid"; rmdir "$task_lock"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM HUP
+printf '%s\n' "$$" > "$task_lock/pid"
+gateway mcu drive.get > "$task_dir/preflight.json" || exit 1
+grep -q '"available":true' "$task_dir/preflight.json" && grep -q '"ready":true' "$task_dir/preflight.json" && grep -q '"armed":false' "$task_dir/preflight.json" || { task_result=not_ready; exit 1; }
+gateway mcu drive.arm > "$task_dir/arm.json" || exit 1
+gateway mcu drive.test "$task_outbound" "$task_return" > "$task_dir/start.json" || exit 1
+task_started=$(mono)
+while [ $(( $(mono)-task_started )) -lt 120 ]; do
+    [ ! -f "$task_dir/stop" ] || { task_result=stopped; exit 0; }
+    task_rc=0
+    gateway supervise drive > "$task_dir/latest.json.tmp" 2>> "$task_dir/errors.log" || task_rc=$?
+    mv "$task_dir/latest.json.tmp" "$task_dir/latest.json"
+    printf '{"utc":"%s","sample":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$task_dir/latest.json")" >> "$task_dir/samples.jsonl"
+    if grep -q '"armed":false' "$task_dir/latest.json"; then
+        task_stopped=1
+        if grep -q '"reason":"completed"' "$task_dir/latest.json"; then task_result=completed; exit 0; fi
+        task_result=controller_stopped; exit 1
+    fi
+    [ "$task_rc" = 0 ] || { task_result=heartbeat_failed; exit 1; }
+    sleep 0.1
+done
+task_result=timeout; exit 1

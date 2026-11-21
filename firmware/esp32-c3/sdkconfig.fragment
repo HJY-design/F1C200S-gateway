@@ -1,0 +1,9 @@
+# ESP firmware project configuration fragment, not a complete sdkconfig.
+# Select target esp32c3 via idf.py set-target first.
+# Match it to the pinned esp-hosted-linux repository; do not mix FG/MCU.
+CONFIG_ESP_SPI_HOST_INTERFACE=y
+CONFIG_ESP_SPI_GPIO_HANDSHAKE=3
+CONFIG_ESP_SPI_GPIO_DATA_READY=4
+CONFIG_ESP_SPI_CHECKSUM=y
+# Choose Wi-Fi-only Bluetooth settings in menuconfig after reviewing IDF 6.1.
+# Do not copy obsolete CONFIG_BTDM_* options from another ESP chip blindly.

@@ -1,0 +1,14 @@
+ctrl_interface=/run/wpa_supplicant
+update_config=0
+network={
+    ssid="REPLACE_WITH_PREFERRED_SSID"
+    psk="REPLACE_WITH_PREFERRED_WIFI_PASSWORD"
+    priority=20
+    id_str="gateway-preferred"
+}
+network={
+    ssid="REPLACE_WITH_FALLBACK_SSID"
+    psk="REPLACE_WITH_FALLBACK_WIFI_PASSWORD"
+    priority=10
+    id_str="gateway-fallback"
+}

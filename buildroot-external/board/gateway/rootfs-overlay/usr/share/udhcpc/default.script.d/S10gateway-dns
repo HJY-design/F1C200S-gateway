@@ -1,0 +1,17 @@
+#!/bin/sh
+# This gateway has one network interface. Keep resolver lines compatible with
+# the small BusyBox nslookup implementation, which rejects inline comments.
+[ "$interface" = wlan0 ] || exit 0
+case "$1" in
+  bound|renew)
+    {
+      if [ -n "$search" ]; then
+        printf 'search %s\n' "$search"
+      elif [ -n "$domain" ]; then
+        printf 'search %s\n' "$domain"
+      fi
+      for server in $dns; do printf 'nameserver %s\n' "$server"; done
+    } > /etc/resolv.conf
+    ;;
+  deconfig) : > /etc/resolv.conf ;;
+esac

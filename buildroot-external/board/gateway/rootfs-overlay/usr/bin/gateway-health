@@ -1,0 +1,91 @@
+#!/bin/sh
+# Recover gateway services only; never reset a target or reboot the board.
+printf '%s\n' "$$" > /run/gateway-health.pid
+trap 'rm -f /run/gateway-health.pid; exit 0' INT TERM
+gateway-event 'gateway-monitor-start'
+net_last=unset
+usb_last=unset
+http_failed=0
+state_last=
+state_stale=0
+alive() { gateway-process-alive "$@"; }
+recover() {
+    name=$1; script=$2; operation=$3
+    now=$(cut -d. -f1 /proc/uptime)
+    previous=$(cat "/run/gateway-recover-$name.last" 2>/dev/null)
+    case "$previous" in ''|*[!0-9]*) previous=0 ;; esac
+    [ "$previous" -eq 0 ] || [ "$((now-previous))" -ge 60 ] || return 0
+    echo "$now" > "/run/gateway-recover-$name.last"
+    gateway-event "service-recovery name=$name action=$operation"
+    gateway-timeout 25 "$script" "$operation" > "/run/gateway-recover-$name.log" 2>&1
+    result=$?
+    gateway-event "service-recovery-result name=$name status=$result"
+}
+ensure() {
+    name=$1; script=$2; pid=$3; executable=$4; token=${5:-}
+    [ ! -e "/run/gateway-$name.disabled" ] || return 0
+    if [ -n "$token" ]; then alive "$pid" "$executable" "$token" && return 0
+    else alive "$pid" "$executable" && return 0; fi
+    rm -f "$pid"
+    recover "$name" "$script" start
+}
+while :; do
+    if [ -e /run/gateway-health.paused ]; then sleep 5; continue; fi
+    ensure logger /etc/init.d/S42gateway-logger /run/gateway-log-service.pid /usr/bin/gateway-log-service
+    ensure state /etc/init.d/S44gateway-state /run/gateway-state.pid /www/cgi-bin/gateway-api --snapshot
+    ensure time /etc/init.d/S43gateway-time /run/gateway-time.pid /usr/bin/gateway-time
+    ensure httpd /etc/init.d/S50gateway-httpd /run/gateway-httpd.pid /bin/busybox httpd
+    if [ ! -e /run/gateway-httpd.disabled ]; then
+        if gateway-timeout 4 wget -T 2 -q -O /dev/null http://127.0.0.1/index.html; then http_failed=0
+        else http_failed=$((http_failed+1)); fi
+        if [ "$http_failed" -ge 3 ] && [ ! -e /run/gateway-httpd.disabled ] &&
+           alive /run/gateway-httpd.pid /bin/busybox httpd; then
+            recover httpd /etc/init.d/S50gateway-httpd restart
+            http_failed=0
+        fi
+    fi
+    if [ ! -e /run/gateway-state.disabled ]; then
+        sequence=$(sed -n 's/.*"sequence":\([0-9][0-9]*\).*/\1/p' /run/gateway-status.json 2>/dev/null)
+        if [ -n "$sequence" ] && [ "$sequence" != "$state_last" ]; then state_stale=0
+        else state_stale=$((state_stale+1)); fi
+        state_last=$sequence
+        if [ "$state_stale" -ge 3 ] && alive /run/gateway-state.pid /www/cgi-bin/gateway-api --snapshot; then
+            recover state /etc/init.d/S44gateway-state restart
+            state_stale=0
+        fi
+    fi
+    if [ ! -e /run/gateway-wifi.disabled ] && [ ! -d /run/gateway-wifi-recover.lock ] &&
+       [ -s /run/gateway-wifi-allowed.ids ]; then
+        wifi_repair=
+        for item in dhcp wifi-prefer; do
+            case "$item" in
+                dhcp) executable=udhcpc; token=wlan0 ;;
+                wifi-prefer) executable=/usr/bin/gateway-wifi-prefer; token= ;;
+            esac
+            pid=/run/gateway-$item.pid
+            if [ -n "$token" ]; then alive "$pid" "$executable" "$token" && continue
+            else alive "$pid" "$executable" && continue; fi
+            rm -f "$pid"; wifi_repair=$item
+        done
+        [ -z "$wifi_repair" ] || recover "$wifi_repair" /etc/init.d/S41wifi start
+    fi
+    address=$(ip -4 addr show wlan0 2>/dev/null | awk '/inet / {print $2}')
+    carrier=$(cat /sys/class/net/wlan0/carrier 2>/dev/null)
+    net="carrier=${carrier:-unknown} ipv4=${address:-none}"
+    if [ "$net" != "$net_last" ]; then
+        gateway-event "network $net"
+        net_last=$net
+    fi
+    usb=
+    for node in /sys/bus/usb/devices/*; do
+        [ "$(cat "$node/idVendor" 2>/dev/null)" = 0483 ] || continue
+        [ "$(cat "$node/idProduct" 2>/dev/null)" = 3748 ] || continue
+        usb="$usb ${node##*/}:dev$(cat "$node/devnum" 2>/dev/null)"
+    done
+    usb=${usb:-absent}
+    if [ "$usb" != "$usb_last" ]; then
+        gateway-event "stlink-enumeration $usb"
+        usb_last=$usb
+    fi
+    sleep 10
+done

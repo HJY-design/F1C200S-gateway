@@ -1,0 +1,44 @@
+#!/bin/sh
+# Hardware-dependent template; not run on a target board.
+# Raw UART capture, three bounded RAM files; not line-timestamped.
+set -eu
+dev=${1:-/dev/ttyS1}
+out=/run/gateway-uart
+lock=/run/f407-uart-log.lock
+if [ ! -c "$dev" ]; then
+    echo "UART device is not a character device: $dev" >&2
+    exit 1
+fi
+if ! mkdir "$lock" 2>/dev/null; then
+    echo "UART logger lock exists: $lock (check running logger before removing)" >&2
+    exit 1
+fi
+reader_pid=
+cleanup() {
+    if [ -n "$reader_pid" ]; then
+        kill "$reader_pid" 2>/dev/null || :
+        wait "$reader_pid" 2>/dev/null || :
+    fi
+    rm -f "$lock/pid"
+    rmdir "$lock" 2>/dev/null || :
+}
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+echo "$$" > "$lock/pid"
+mkdir -p "$out"
+stty -F "$dev" 115200 cs8 -parenb -cstopb -crtscts raw -echo
+while :; do
+    [ ! -f "$out/raw.1.bin" ] || mv -f "$out/raw.1.bin" "$out/raw.2.bin"
+    [ ! -f "$out/raw.0.bin" ] || mv -f "$out/raw.0.bin" "$out/raw.1.bin"
+    dd if="$dev" of="$out/raw.0.bin" bs=1024 count=64 2>"$out/reader-status.txt" &
+    reader_pid=$!
+    if ! wait "$reader_pid"; then
+        cat "$out/reader-status.txt" >&2
+        exit 1
+    fi
+    reader_pid=
+    if [ ! -s "$out/raw.0.bin" ]; then
+        echo "UART returned no data / EOF; stopping logger" >&2
+        exit 1
+    fi
+done

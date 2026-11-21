@@ -1,0 +1,63 @@
+#!/bin/sh
+# Execute finite route batches locally, retaining the same F407 odometry frame.
+set -u
+task_mode=${1:---plan}; task_id=${2:-}
+case "$task_id" in ''|*[!a-zA-Z0-9_-]*) exit 2 ;; esac
+task_plan=/data/route-plans/$task_id
+[ -f "$task_plan/plan.json" ] && [ -f "$task_plan/batch-1.txt" ] || exit 2
+case "$task_mode" in
+    --plan) cat "$task_plan/plan.json"; exit 0 ;;
+    --run) exec gateway supervise vehicle sequence "$task_id" ;;
+    --locked) ;;
+    *) exit 2 ;;
+esac
+[ -e /proc/$$/fd/9 ] || exit 1
+task_lock=/run/gateway-route-sequence.lock
+mkdir "$task_lock" 2>/dev/null || exit 1
+task_dir=/data/tests/fullgrid-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$task_dir" || { rmdir "$task_lock"; exit 1; }
+task_result=interrupted task_completed=0 task_child= task_job=
+finish() {
+    if [ -n "$task_child" ]; then kill -TERM "$task_child" 2>/dev/null || :; wait "$task_child" 2>/dev/null || :; fi
+    if [ "$task_result" != completed ]; then gateway mcu drive.stop > "$task_dir/stop-reply.json" 2>> "$task_dir/errors.log" || :; fi
+    cat /proc/meminfo > "$task_dir/memory-after.txt"
+    printf '{"state":"%s","completed_batches":%s,"odometry_reset":false,"directory":"%s","last_child":"%s"}\n' "$task_result" "$task_completed" "$task_dir" "$task_job" > "$task_dir/result.json"
+    sync; rm -f "$task_lock/pid" "$task_lock/directory"; rmdir "$task_lock"
+}
+trap finish EXIT
+trap 'task_result=stopped; exit 130' INT TERM HUP
+printf '%s\n' "$$" > "$task_lock/pid"
+printf '%s\n' "$task_dir" > "$task_lock/directory"
+cp "$task_plan/plan.json" "$task_dir/plan.json"
+cat /proc/meminfo > "$task_dir/memory-before.txt"
+task_batch=1
+while [ -f "$task_plan/batch-$task_batch.txt" ]; do
+    [ "$task_batch" -le 10 ] || { task_result=invalid_plan; exit 1; }
+    [ ! -f "$task_dir/stop" ] || { task_result=stopped; exit 0; }
+    printf '{"state":"loading","batch":%s,"completed_batches":%s}\n' "$task_batch" "$task_completed" > "$task_dir/progress.json"
+    gateway mcu drive.get > "$task_dir/batch-$task_batch-preflight.json" || exit 1
+    grep -q '"armed":false' "$task_dir/batch-$task_batch-preflight.json" && grep -q '"ready":true' "$task_dir/batch-$task_batch-preflight.json" || { task_result=not_ready; exit 1; }
+    gateway mcu drive.test route.clear > "$task_dir/batch-$task_batch-upload.jsonl" || exit 1
+    while read -r task_x task_y task_yaw task_align; do
+        [ ! -f "$task_dir/stop" ] || { task_result=stopped; exit 0; }
+        gateway mcu drive.test route.add "$task_x" "$task_y" "$task_yaw" "$task_align" >> "$task_dir/batch-$task_batch-upload.jsonl" || exit 1
+    done < "$task_plan/batch-$task_batch.txt"
+    cp "$task_plan/batch-$task_batch.json" /data/tests/next-route.json
+    : > "$task_dir/current-job"
+    GATEWAY_ROUTE_JOBFILE="$task_dir/current-job" /usr/bin/gateway-route-test --locked 1 1000 > "$task_dir/batch-$task_batch-console.log" 2>&1 &
+    task_child=$!
+    printf '{"state":"running","batch":%s,"completed_batches":%s}\n' "$task_batch" "$task_completed" > "$task_dir/progress.json"
+    while kill -0 "$task_child" 2>/dev/null; do
+        if [ -f "$task_dir/stop" ]; then task_result=stopped; exit 130; fi
+        sleep 0.5
+    done
+    task_rc=0; wait "$task_child" || task_rc=$?; task_child=
+    task_job=$(cat "$task_dir/current-job")
+    printf '%s\n' "$task_job" > "$task_dir/batch-$task_batch-directory"
+    if [ "$task_rc" != 0 ] || [ ! -f "$task_job/result.json" ] || ! grep -q '"state":"completed"' "$task_job/result.json"; then
+        task_result=controller_stopped; exit 1
+    fi
+    task_completed=$task_batch; task_batch=$((task_batch+1))
+done
+task_result=completed
+printf '{"state":"completed","completed_batches":%s}\n' "$task_completed" > "$task_dir/progress.json"

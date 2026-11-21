@@ -1,0 +1,315 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Espressif Systems Wireless LAN device driver
+ *
+ * SPDX-FileCopyrightText: 2015-2023 Espressif Systems (Shanghai) CO LTD
+ *
+ */
+#include "utils.h"
+#include "esp_api.h"
+#include "esp_bt_api.h"
+#include "esp_kernel_port.h"
+#include "esp_if.h"
+
+#define INVALID_HDEV_BUS (0xff)
+
+void esp_hci_update_tx_counter(struct hci_dev *hdev, u8 pkt_type, size_t len)
+{
+	if (!hdev)
+		return;
+	if (pkt_type == HCI_COMMAND_PKT) {
+		hdev->stat.cmd_tx++;
+	} else if (pkt_type == HCI_ACLDATA_PKT) {
+		hdev->stat.acl_tx++;
+	} else if (pkt_type == HCI_SCODATA_PKT) {
+		hdev->stat.sco_tx++;
+	}
+
+	hdev->stat.byte_tx += len;
+}
+
+void esp_hci_update_rx_counter(struct hci_dev *hdev, u8 pkt_type, size_t len)
+{
+	if (!hdev)
+		return;
+
+	if (pkt_type == HCI_EVENT_PKT) {
+		hdev->stat.evt_rx++;
+	} else if (pkt_type == HCI_ACLDATA_PKT) {
+		hdev->stat.acl_rx++;
+	} else if (pkt_type == HCI_SCODATA_PKT) {
+		hdev->stat.sco_rx++;
+	}
+
+	hdev->stat.byte_rx += len;
+}
+
+static bool esp_bt_session_ready(struct esp_adapter *adapter)
+{
+	return adapter &&
+		test_bit(ESP_INIT_DONE, &adapter->state_flags) &&
+		!test_bit(ESP_ALLOW_RECONSTRUCT, &adapter->state_flags) &&
+		!test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) &&
+		!test_bit(ESP_FW_RECOVERY_PENDING, &adapter->state_flags) &&
+		!test_bit(ESP_FW_RESET_EXPECTED, &adapter->state_flags) &&
+		!test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags) &&
+		!test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) &&
+		atomic_read(&adapter->state) >= ESP_CONTEXT_READY;
+}
+
+static int esp_bt_open(struct hci_dev *hdev)
+{
+	struct esp_adapter *adapter;
+
+	if (!hdev)
+		return -EINVAL;
+	adapter = hci_get_drvdata(hdev);
+	if (!esp_bt_session_ready(adapter))
+		return -EBUSY;
+	return 0;
+}
+
+static int esp_bt_flush(struct hci_dev *hdev)
+{
+	struct esp_adapter *adapter;
+
+	if (!hdev)
+		return -EINVAL;
+	adapter = hci_get_drvdata(hdev);
+	if (adapter && adapter->if_ops && adapter->if_ops->flush_bt_traffic)
+		adapter->if_ops->flush_bt_traffic(adapter);
+	return 0;
+}
+
+static int esp_bt_close(struct hci_dev *hdev)
+{
+	return esp_bt_flush(hdev);
+}
+
+static ESP_BT_SEND_FRAME_PROTOTYPE()
+{
+	struct esp_payload_header *hdr;
+	size_t total_len, len = skb->len;
+	int ret = 0;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0))
+	struct hci_dev *hdev = (struct hci_dev *)(skb->dev);
+#endif
+	struct esp_adapter *adapter = hci_get_drvdata(hdev);
+	struct sk_buff *new_skb;
+	u8 pad_len = 0, realloc_skb = 0;
+	u8 *pos = NULL;
+	u8 pkt_type;
+
+	if (!adapter) {
+		esp_err("Invalid args");
+		return -EINVAL;
+	}
+	/* Do not consume the HCI skb until the current firmware incarnation is
+	 * fully published. This closes the reconstruction window where TX could
+	 * be accepted while RX completions were still intentionally dropped. */
+	if (!esp_bt_session_ready(adapter))
+		return -EBUSY;
+	esp_hex_dump_verbose("bt_tx: ", skb->data, len);
+
+	/* Create space for payload header */
+	pad_len = sizeof(struct esp_payload_header);
+	total_len = len + sizeof(struct esp_payload_header);
+
+	/* Align buffer len */
+	pad_len += (SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT)) %
+		SKB_DATA_ADDR_ALIGNMENT;
+
+	pkt_type = hci_skb_pkt_type(skb);
+
+	if (skb_headroom(skb) < pad_len) {
+		/* Headroom is not sufficient */
+		realloc_skb = 1;
+	}
+
+	if (realloc_skb || !IS_ALIGNED((unsigned long) skb->data, SKB_DATA_ADDR_ALIGNMENT)) {
+		/* Realloc SKB */
+		if (skb_linearize(skb)) {
+			hdev->stat.err_tx++;
+			return -EINVAL;
+		}
+
+		new_skb = esp_if_alloc_skb(adapter, skb->len + pad_len);
+
+		if (!new_skb) {
+			esp_err("Failed to allocate SKB");
+			hdev->stat.err_tx++;
+			return -ENOMEM;
+		}
+
+		pos = new_skb->data;
+
+		pos += pad_len;
+
+		/* Populate new SKB */
+		skb_copy_from_linear_data(skb, pos, skb->len);
+		skb_put(new_skb, skb->len + pad_len);
+
+		/* HCI skb is now consumed; send() must return 0 after this. */
+		dev_kfree_skb_any(skb);
+		skb = new_skb;
+	} else {
+		/* Realloc is not needed, Make space for interface header */
+		skb_push(skb, pad_len);
+		memset(skb->cb, 0, sizeof(skb->cb));
+	}
+
+	hdr = (struct esp_payload_header *) skb->data;
+
+	memset(hdr, 0, pad_len);
+
+	hdr->if_type = ESP_HCI_IF;
+	hdr->if_num = 0;
+	hdr->len = esp_wire_cpu_to_le16(len);
+	hdr->offset = esp_wire_cpu_to_le16(pad_len);
+	pos = skb->data;
+
+	/* Firmware consumes the H4 packet type from offset - 1. Duplicate it in
+	 * the fixed header union as well so transport-side ambiguity classifiers
+	 * can identify HCI commands even when alignment padding extends offset. */
+	hdr->hci_pkt_type = pkt_type;
+	*(pos + pad_len - 1) = pkt_type;
+
+	if (adapter->capabilities & ESP_CHECKSUM_ENABLED)
+		hdr->checksum = esp_wire_cpu_to_le16(compute_checksum(skb->data,
+							       len + pad_len));
+
+	/* Transport always consumes skb. HCI core kfree_skb()s the frame we
+	 * were given if send() returns an error, so a non-zero return after
+	 * this point is a double-free (seen as bluetoothd consume_skb Oops
+	 * during reboot/unload). */
+	total_len = skb->len;
+	ret = esp_send_packet(adapter, skb);
+	skb = NULL;
+
+	if (ret) {
+		hdev->stat.err_tx++;
+		/* Transport consumed the skb but failed delivery. Because send() must
+		 * return 0 to prevent double-free in HCI core, Linux believes this packet
+		 * committed. Reincarnate firmware to prevent silent loss of HCI commands
+		 * or ACL flow-control credits. */
+		esp_schedule_fw_reset_recovery(adapter);
+		esp_request_firmware_restart(adapter);
+	} else {
+		esp_hci_update_tx_counter(hdev, pkt_type, total_len);
+	}
+
+	return 0;
+}
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0))
+static int esp_bt_setup(struct hci_dev *hdev)
+{
+	return 0;
+}
+#endif
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0))
+static int esp_bt_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+{
+	return 0;
+}
+#endif
+
+int esp_deinit_bt(struct esp_adapter *adapter)
+{
+	struct hci_dev *hdev = NULL;
+
+	if (!adapter || !adapter->hcidev)
+		return 0;
+
+	hdev = adapter->hcidev;
+	adapter->hcidev = NULL;
+
+	hci_set_drvdata(hdev, NULL);
+	hci_unregister_dev(hdev);
+	hci_free_dev(hdev);
+
+	return 0;
+}
+
+int esp_init_bt(struct esp_adapter *adapter)
+{
+	int ret = 0;
+	struct hci_dev *hdev = NULL;
+
+	if (!adapter) {
+		return -EINVAL;
+	}
+
+	if (adapter->hcidev) {
+		return -EEXIST;
+	}
+
+	hdev = hci_alloc_dev();
+
+	if (!hdev) {
+		BT_ERR("Can not allocate HCI device");
+		return -ENOMEM;
+	}
+
+	adapter->hcidev = hdev;
+	hci_set_drvdata(hdev, adapter);
+
+	hdev->bus = INVALID_HDEV_BUS;
+
+	if (adapter->if_type == ESP_IF_TYPE_SDIO)
+		hdev->bus   = HCI_SDIO;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0))
+	else if (adapter->if_type == ESP_IF_TYPE_SPI)
+		hdev->bus   = HCI_SPI;
+#endif
+	else if (adapter->if_type == ESP_IF_TYPE_USB)
+		hdev->bus   = HCI_USB;
+
+	if (hdev->bus == INVALID_HDEV_BUS) {
+
+		if (adapter->if_type == ESP_IF_TYPE_SDIO) {
+			esp_err("Kernel version does not support HCI over SDIO BUS\n");
+		} else if (adapter->if_type == ESP_IF_TYPE_SPI) {
+			esp_err("Kernel version does not support HCI over SPI BUS\n");
+		} else if (adapter->if_type == ESP_IF_TYPE_USB) {
+			esp_err("Kernel version does not support HCI over USB BUS\n");
+		} else {
+			esp_err("HCI over expected BUS[%u] is not supported\n", adapter->if_type);
+		}
+		hci_free_dev(hdev);
+		adapter->hcidev = NULL;
+		return -EINVAL;
+	}
+
+	hdev->open  = esp_bt_open;
+	hdev->close = esp_bt_close;
+	hdev->flush = esp_bt_flush;
+	hdev->send  = esp_bt_send_frame;
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0))
+	hdev->setup = esp_bt_setup;
+#endif
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0))
+	hdev->set_bdaddr = esp_bt_set_bdaddr;
+#endif
+
+#ifdef HCI_PRIMARY
+	hdev->dev_type = HCI_PRIMARY;
+#endif
+
+	if (adapter->dev)
+		SET_HCIDEV_DEV(hdev, adapter->dev);
+
+	ret = hci_register_dev(hdev);
+	if (ret < 0) {
+		BT_ERR("Can not register HCI device");
+		hci_set_drvdata(hdev, NULL);
+		adapter->hcidev = NULL;
+		hci_free_dev(hdev);
+		return ret;
+	}
+
+	return 0;
+}

@@ -1,0 +1,64 @@
+#!/bin/sh
+# Board-local, bounded, read-only sampling. MCU owns the 100 Hz statistics.
+set -u
+task_duration=${1:-3600}
+case "$task_duration" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$task_duration" -ge 60 ] && [ "$task_duration" -le 86400 ] || exit 2
+task_lock=/run/gateway-inertial-record.lock
+mkdir "$task_lock" 2>/dev/null || { echo 'inertial recording already active'; exit 1; }
+task_dir=/data/tests/inertial-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$task_dir" || { rmdir "$task_lock"; exit 1; }
+task_buffer=/run/gateway-inertial-buffer.$$
+task_latest=/run/gateway-inertial-latest.$$
+task_progress=/run/gateway-inertial-record.json
+task_count=0 task_errors=0 task_invalid=0 task_elapsed=0 task_phase=collecting
+task_finished=0 task_flushed=0
+mono() { read -r task_up task_rest < /proc/uptime; printf '%s\n' "${task_up%%.*}"; }
+task_started=$(mono)
+printf '%s\n' "$$" > "$task_lock/pid"
+printf '%s\n' "$task_dir" > "$task_lock/directory"
+: > "$task_buffer"
+progress() {
+    printf '{"phase":"%s","pid":%s,"directory":"%s","elapsed_s":%s,"duration_s":%s,"records":%s,"request_errors":%s,"invalid_records":%s,"buffer_window_s":10}\n' \
+        "$task_phase" "$$" "$task_dir" "$task_elapsed" "$task_duration" "$task_count" "$task_errors" "$task_invalid" > "$task_progress.tmp.$$"
+    mv "$task_progress.tmp.$$" "$task_progress"
+}
+flush() {
+    if [ -s "$task_buffer" ]; then cat "$task_buffer" >> "$task_dir/samples.jsonl" && : > "$task_buffer"; fi
+    if [ -s "$task_latest" ]; then cp "$task_latest" "$task_dir/latest.json.tmp" && mv "$task_dir/latest.json.tmp" "$task_dir/latest.json"; fi
+    cp "$task_progress" "$task_dir/progress.json.tmp" && mv "$task_dir/progress.json.tmp" "$task_dir/progress.json"
+    task_flushed=$task_elapsed
+}
+finish() {
+    [ "$task_finished" = 1 ] || task_phase=interrupted
+    progress; flush; sync
+    rm -f "$task_buffer" "$task_latest" "$task_lock/pid" "$task_lock/directory"
+    rmdir "$task_lock"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM HUP
+printf '{"started_utc":"%s","boot_id":"%s","duration_s":%s,"sample_interval_s":2,"algorithm":"Fusion AHRS without magnetometer; native sensor axes","vehicle_pose_valid":false,"stationary_confirmed_by_user":true}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat /proc/sys/kernel/random/boot_id)" "$task_duration" > "$task_dir/metadata.json"
+progress
+while [ "$task_elapsed" -lt "$task_duration" ]; do
+    [ ! -f "$task_dir/stop" ] || { task_phase=stopped; task_finished=1; exit 0; }
+    task_cycle=$(mono)
+    if gateway sample inertial > "$task_latest.tmp" 2>> "$task_dir/errors.log"; then
+        task_elapsed=$(( $(mono) - task_started ))
+        task_count=$((task_count+1))
+        if grep -E -q '"valid":false|"lost":true|"stationary":false|"calibrated":false' "$task_latest.tmp"; then task_invalid=$((task_invalid+1)); fi
+        printf '{"record":%s,"elapsed_s":%s,"utc":"%s","sample":%s}\n' "$task_count" "$task_elapsed" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$task_latest.tmp")" > "$task_latest"
+        cat "$task_latest" >> "$task_buffer"
+        rm -f "$task_latest.tmp"
+    else
+        task_errors=$((task_errors+1)); task_elapsed=$(( $(mono) - task_started ))
+        printf '{"elapsed_s":%s,"error":"inertial_rpc_failed"}\n' "$task_elapsed" >> "$task_buffer"
+        rm -f "$task_latest.tmp"
+    fi
+    progress
+    if [ "$task_elapsed" -ge 1200 ] && [ ! -f "$task_dir/stage-1200.json" ] && [ -s "$task_latest" ]; then cp "$task_latest" "$task_dir/stage-1200.json"; fi
+    if [ $((task_elapsed-task_flushed)) -ge 10 ]; then flush; fi
+    task_wait=$((task_cycle+2-$(mono)))
+    [ "$task_wait" -le 0 ] || sleep "$task_wait"
+done
+task_phase=completed; task_finished=1

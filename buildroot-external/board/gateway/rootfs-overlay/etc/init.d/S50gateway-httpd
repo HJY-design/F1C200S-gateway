@@ -1,0 +1,44 @@
+#!/bin/sh
+wait_http_ready() {
+  attempts=0
+  while [ "$attempts" -lt 10 ]; do
+    if gateway-process-alive /run/gateway-httpd.pid /bin/busybox httpd &&
+       gateway-timeout 2 wget -T 1 -q -O /dev/null http://127.0.0.1/index.html 2>/dev/null; then return 0; fi
+    attempts=$((attempts+1))
+    sleep 0.2
+  done
+  return 1
+}
+case "$1" in
+  start)
+    rm -f /run/gateway-httpd.disabled
+    if gateway-process-alive /run/gateway-httpd.pid /bin/busybox httpd; then wait_http_ready; exit $?; fi
+    rm -f /run/gateway-httpd.pid
+    umask 077
+    [ -s /run/gateway-web-token ] || od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > /run/gateway-web-token
+    /www/cgi-bin/gateway-api --recover
+    printf 'Starting gateway HTTP: '
+    start-stop-daemon -S -q -b -m -p /run/gateway-httpd.pid -x /bin/busybox -- httpd -f -p 80 -h /www -c /etc/gateway/httpd.conf || exit 1
+    if wait_http_ready; then echo OK; else echo FAILED; exit 1; fi
+    ;;
+  stop)
+    : > /run/gateway-httpd.disabled
+    if gateway-process-alive /run/gateway-httpd.pid /bin/busybox httpd; then
+      task_pid=$(cat /run/gateway-httpd.pid)
+      kill -CONT "$task_pid" 2>/dev/null
+      kill -TERM "$task_pid" 2>/dev/null
+      attempts=0
+      while kill -0 "$task_pid" 2>/dev/null && [ "$attempts" -lt 10 ]; do
+        sleep 0.2; attempts=$((attempts+1))
+      done
+      if gateway-process-alive /run/gateway-httpd.pid /bin/busybox httpd; then
+        kill -KILL "$task_pid" 2>/dev/null
+        sleep 0.2
+        kill -0 "$task_pid" 2>/dev/null && exit 1
+      fi
+    fi
+    rm -f /run/gateway-httpd.pid
+    ;;
+  restart) "$0" stop && "$0" start ;;
+  *) exit 1 ;;
+esac

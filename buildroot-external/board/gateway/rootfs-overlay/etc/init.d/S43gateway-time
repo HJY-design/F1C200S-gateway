@@ -1,0 +1,25 @@
+#!/bin/sh
+case "$1" in
+  start)
+    rm -f /run/gateway-time.disabled
+    gateway-process-alive /run/gateway-time.pid /usr/bin/gateway-time && exit 0
+    rm -f /run/gateway-time.pid
+    start-stop-daemon -S -q -b -m -p /run/gateway-time.pid -x /usr/bin/gateway-time
+    ;;
+  stop)
+    : > /run/gateway-time.disabled
+    if gateway-process-alive /run/gateway-time.pid /usr/bin/gateway-time; then
+      task_pid=$(cat /run/gateway-time.pid)
+      kill -CONT "$task_pid" 2>/dev/null
+      kill -TERM "$task_pid" 2>/dev/null
+      attempts=0
+      while kill -0 "$task_pid" 2>/dev/null && [ "$attempts" -lt 6 ]; do
+        sleep 1; attempts=$((attempts+1))
+      done
+      kill -0 "$task_pid" 2>/dev/null && exit 1
+    fi
+    rm -f /run/gateway-time.pid
+    ;;
+  restart) "$0" stop && "$0" start ;;
+  *) exit 1 ;;
+esac

@@ -1,0 +1,29 @@
+#!/bin/sh
+case "$1" in
+  start)
+    rm -f /run/gateway-state.disabled
+    gateway-process-alive /run/gateway-state.pid /www/cgi-bin/gateway-api --snapshot && exit 0
+    rm -f /run/gateway-state.pid
+    start-stop-daemon -S -q -b -m -p /run/gateway-state.pid -x /www/cgi-bin/gateway-api -- --snapshot
+    ;;
+  stop)
+    : > /run/gateway-state.disabled
+    task_pid=$(cat /run/gateway-state.pid 2>/dev/null)
+    if gateway-process-alive /run/gateway-state.pid /www/cgi-bin/gateway-api --snapshot; then
+      kill -CONT "$task_pid" 2>/dev/null
+      kill -TERM "$task_pid" 2>/dev/null
+    else task_pid=; fi
+    task_wait=0
+    while [ -n "$task_pid" ] && kill -0 "$task_pid" 2>/dev/null && [ "$task_wait" -lt 6 ]; do
+      sleep 1; task_wait=$((task_wait + 1))
+    done
+    if [ -n "$task_pid" ] && gateway-process-alive /run/gateway-state.pid /www/cgi-bin/gateway-api --snapshot; then
+      kill -KILL "$task_pid" 2>/dev/null
+      sleep 1
+      kill -0 "$task_pid" 2>/dev/null && exit 1
+    fi
+    rm -f /run/gateway-state.pid
+    ;;
+  restart) "$0" stop && "$0" start ;;
+  *) exit 1 ;;
+esac

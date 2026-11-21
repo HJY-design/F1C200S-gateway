@@ -1,0 +1,41 @@
+#!/bin/sh
+case "$1" in
+  start)
+    rm -f /run/gateway-logger.disabled
+    if [ -r /run/gateway-log-service.pid ]; then
+      read -r service_pid < /run/gateway-log-service.pid
+      case "$service_pid" in
+        ''|*[!0-9]*) ;;
+        *)
+          if kill -0 "$service_pid" 2>/dev/null &&
+             [ -r "/proc/$service_pid/cmdline" ] &&
+             tr '\000' '\n' < "/proc/$service_pid/cmdline" |
+               grep -F -x -q /usr/bin/gateway-log-service; then
+            printf 'Independent UART logger already running\n'
+            exit 0
+          fi
+          ;;
+      esac
+    fi
+    printf 'Starting independent UART logger: '
+    start-stop-daemon -S -q -b -m -p /run/gateway-log-service.pid -x /usr/bin/gateway-log-service
+    ;;
+  stop)
+    : > /run/gateway-logger.disabled
+    if gateway-process-alive /run/gateway-log-service.pid /usr/bin/gateway-log-service; then
+      task_pid=$(cat /run/gateway-log-service.pid)
+      kill -CONT "$task_pid" 2>/dev/null
+      kill -TERM "$task_pid" 2>/dev/null
+      attempts=0
+      while kill -0 "$task_pid" 2>/dev/null && [ "$attempts" -lt 6 ]; do
+        sleep 1; attempts=$((attempts+1))
+      done
+      kill -0 "$task_pid" 2>/dev/null && exit 1
+    fi
+    ;;
+  reload)
+    start-stop-daemon -K -q -s HUP -p /run/gateway-logger.pid -x /usr/bin/gateway-logger
+    ;;
+  restart) "$0" stop && "$0" start ;;
+  *) exit 1 ;;
+esac

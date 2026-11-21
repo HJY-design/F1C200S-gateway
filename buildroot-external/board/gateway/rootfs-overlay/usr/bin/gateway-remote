@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+cmd=${1:-status}
+target_cfg() {
+    case "$1" in
+        f103) cfg=/etc/gateway/openocd-f103.cfg ;;
+        f407) cfg=/etc/gateway/openocd-f407-0.12.cfg ;;
+        *) echo 'Unsupported target' >&2; exit 2 ;;
+    esac
+}
+case "$cmd" in
+  status)
+    echo '--- Gateway ---'; uptime; free; df -h /
+    echo '--- Wi-Fi ---'; wpa_cli -i wlan0 status || :; ip -4 addr show wlan0; ip route
+    echo '--- Target control requests ---'; gateway-ctl status || :
+    echo '--- USB ---'; lsusb
+    echo '--- SPI checksum errors since boot ---'; dmesg | grep -c ESP_RX_CHECKSUM_ERROR || :
+    ;;
+  network-test)
+    ping -c 3 -W 3 223.5.5.5
+    nslookup example.com
+    wget -T 15 -O /run/gateway-http-test.html http://example.com
+    ;;
+  target)
+    case "${2:-}" in normal|reset|rom|status) exec gateway-ctl "$2" ;; *) exit 2 ;; esac
+    ;;
+  probe)
+    target_cfg "${2:-f103}"
+    exec openocd -f "$cfg" -c 'init; targets; shutdown'
+    ;;
+  program)
+    target_cfg "${2:-}"
+    file=${3:-}; address=${4:-0x08000000}
+    case "$file" in /run/gw-upload-*) ;; *) exit 2 ;; esac
+    basename "$file" | grep -Eq '^gw-upload-[a-f0-9]+\.(bin|elf|hex)$' || exit 2
+    [ -s "$file" ] || { echo 'Firmware file missing' >&2; exit 2; }
+    case "$address" in 0x*) ;; *) exit 2 ;; esac
+    printf '%s' "$address" | grep -Eq '^0x[0-9a-fA-F]{8}$' || exit 2
+    gateway-ctl normal
+    case "$file" in
+      *.bin) exec openocd -f "$cfg" -c "program $file $address verify reset exit" ;;
+      *) exec openocd -f "$cfg" -c "program $file verify reset exit" ;;
+    esac
+    ;;
+  debug-start)
+    target_cfg "${2:-f103}"
+    if [ -s /run/gateway-openocd.pid ] && kill -0 "$(cat /run/gateway-openocd.pid)" 2>/dev/null; then
+      echo 'OpenOCD already running'; exit 0
+    fi
+    nohup openocd -f "$cfg" > /run/gateway-openocd.log 2>&1 < /dev/null &
+    echo "$!" > /run/gateway-openocd.pid
+    sleep 2
+    if kill -0 "$(cat /run/gateway-openocd.pid)" 2>/dev/null && grep -Eq ':0D05 .* 0A ' /proc/net/tcp; then
+      echo 'OPENOCD_GDB_READY localhost:3333'
+    else
+      cat /run/gateway-openocd.log; exit 1
+    fi
+    ;;
+  debug-stop)
+    if [ -s /run/gateway-openocd.pid ]; then kill "$(cat /run/gateway-openocd.pid)" 2>/dev/null || :; fi
+    rm -f /run/gateway-openocd.pid
+    ;;
+  uart)
+    case "${2:-}" in 1|2) dev=/dev/ttyS$2 ;; *) exit 2 ;; esac
+    baud=${3:-115200}
+    case "$baud" in 9600|19200|38400|57600|115200|230400|460800|921600) ;; *) exit 2 ;; esac
+    lock=/run/gateway-bridge-ttyS$2.lock
+    mkdir "$lock" 2>/dev/null || { echo 'UART is already in use' >&2; exit 1; }
+    old=$(stty -F "$dev" -g)
+    reader=
+    cleanup() { [ -z "$reader" ] || kill "$reader" 2>/dev/null || :; stty -F "$dev" "$old"; rmdir "$lock"; }
+    trap cleanup EXIT
+    trap 'exit 0' HUP INT TERM
+    stty -F "$dev" "$baud" cs8 -parenb -cstopb -crtscts raw -echo
+    cat "$dev" & reader=$!
+    cat > "$dev"
+    ;;
+  logs) dmesg | tail -100 ;;
+  *) echo 'Unsupported command' >&2; exit 2 ;;
+esac

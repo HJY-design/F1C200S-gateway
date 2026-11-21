@@ -1,0 +1,9 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.cgi text eol=lf
+buildroot-external/board/gateway/rootfs-overlay/** text eol=lf
+*.schdoc -text
+*.pcbdoc -text
+*.PrjPcb -text
+*.epro binary

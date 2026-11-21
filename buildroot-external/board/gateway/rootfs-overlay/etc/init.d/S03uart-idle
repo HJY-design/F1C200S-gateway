@@ -1,0 +1,15 @@
+#!/bin/sh
+# Run before UART logging and Wi-Fi startup, without touching target GPIOs.
+case "${1:-}" in
+  start)
+    printf 'Setting UART RX idle bias: '
+    /usr/bin/gateway-uart-idle apply || {
+      logger -t gateway-uart 'UART RX idle bias could not be verified'
+      exit 1
+    }
+    ;;
+  stop) : ;;
+  restart) "$0" start ;;
+  *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+

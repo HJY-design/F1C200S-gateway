@@ -1,0 +1,14 @@
+#!/bin/sh
+# Re-enable only profiles which were enabled in the saved configuration.
+# Runtime connection locking must not turn an intentionally disabled backup on.
+run=${GW_WIFI_RUN_DIR:-/run}
+allowed=$run/gateway-wifi-allowed.ids
+if [ ! -e "$allowed" ]; then
+    exec gateway-timeout 4 wpa_cli -i wlan0 enable_network all
+fi
+result=0
+while IFS= read -r network_id; do
+    case "$network_id" in ''|*[!0-9]*) continue ;; esac
+    gateway-timeout 4 wpa_cli -i wlan0 enable_network "$network_id" || result=1
+done < "$allowed"
+exit "$result"

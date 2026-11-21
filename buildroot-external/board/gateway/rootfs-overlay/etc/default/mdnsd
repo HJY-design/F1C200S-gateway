@@ -1,0 +1,1 @@
+MDNSD_ARGS="-i wlan0"

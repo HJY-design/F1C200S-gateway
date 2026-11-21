@@ -1,0 +1,13 @@
+#!/bin/sh
+# Rebind mDNS after a Wi-Fi device recreation and announce the current address.
+[ "$interface" = wlan0 ] || exit 0
+case "$1" in bound|renew) ;; *) exit 0 ;; esac
+pid=$(cat /run/mdnsd.pid 2>/dev/null)
+case "$pid" in ''|*[!0-9]*) exit 0 ;; esac
+[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = mdnsd ] || exit 0
+previous=$(cat /run/gateway-mdns-ip 2>/dev/null)
+current="$(cat /sys/class/net/wlan0/ifindex 2>/dev/null):$ip"
+[ "$previous" != "$current" ] || exit 0
+if /etc/init.d/S50mdnsd restart; then
+    printf '%s\n' "$current" > /run/gateway-mdns-ip
+fi

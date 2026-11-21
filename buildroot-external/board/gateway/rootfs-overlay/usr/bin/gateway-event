@@ -1,0 +1,17 @@
+#!/bin/sh
+# Bounded, event-only Flash history. Keep raw UART bytes in their own logger.
+set -eu
+dir=${GW_EVENT_DIR:-/data/gateway}
+lock=${GW_EVENT_LOCK:-/run/gateway-event-write.lock}
+mkdir -p "$dir"
+mkdir "$lock" 2>/dev/null || exit 0
+trap 'rmdir "$lock" 2>/dev/null || :' EXIT
+trap 'exit 1' HUP INT TERM
+file=$dir/events.log
+if [ -f "$file" ] && [ "$(wc -c < "$file")" -ge 65536 ]; then
+    mv -f "$file" "$file.1"
+fi
+printf '%s uptime=%s boot=%s %s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    "$(cut -d' ' -f1 /proc/uptime)" \
+    "$(cat /proc/sys/kernel/random/boot_id)" "$*" >> "$file"

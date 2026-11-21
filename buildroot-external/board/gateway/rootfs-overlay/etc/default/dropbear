@@ -1,0 +1,2 @@
+# SSH public-key login using this PC's public key; password login disabled.
+DROPBEAR_ARGS="-s -g"

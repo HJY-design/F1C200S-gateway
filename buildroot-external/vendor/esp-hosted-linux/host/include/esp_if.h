@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Espressif Systems Wireless LAN device driver
+ *
+ * SPDX-FileCopyrightText: 2015-2023 Espressif Systems (Shanghai) CO LTD
+ *
+ */
+#ifndef __ESP_IF__H_
+#define __ESP_IF__H_
+
+#include "esp.h"
+
+extern volatile u8 host_sleep;
+
+struct esp_if_ops {
+	int (*init)(struct esp_adapter *adapter);
+	struct sk_buff* (*read)(struct esp_adapter *adapter);
+	int (*write)(struct esp_adapter *adapter, struct sk_buff *skb);
+	struct sk_buff* (*alloc_skb)(u32 len);
+	int (*quiesce_for_fw_reset)(struct esp_adapter *adapter);
+	int (*reinit_after_fw_reset)(struct esp_adapter *adapter);
+	/*
+	 * Request the transport-owned hardware reset, when available.
+	 * Return 0 once the request is accepted; completion is asynchronous and
+	 * is observed through the normal firmware boot/recovery path.
+	 */
+	int (*reset_target)(struct esp_adapter *adapter);
+	/* <0 error; 0 waiting for a new boot TLV; >0 existing session restored. */
+	int (*recover_transport)(struct esp_adapter *adapter);
+	/* Host caused or observed a firmware reincarnation: rebase then OPEN. */
+	void (*note_fw_reset)(struct esp_adapter *adapter);
+	void (*flush_bt_traffic)(struct esp_adapter *adapter);
+	int (*deinit)(struct esp_adapter *adapter);
+};
+
+static inline struct sk_buff *esp_if_alloc_skb(struct esp_adapter *adapter, u32 len)
+{
+	if (!adapter || !adapter->if_ops || !adapter->if_ops->alloc_skb)
+		return NULL;
+
+	return adapter->if_ops->alloc_skb(len);
+}
+
+int esp_init_interface_layer(struct esp_adapter *adapter, u32 speed);
+void esp_deinit_interface_layer(void);
+
+#endif

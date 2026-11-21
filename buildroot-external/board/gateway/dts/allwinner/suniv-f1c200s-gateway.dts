@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+// NAND/Linux and SPI Wi-Fi validated on the 2026-10-12 board netlist.
+/dts-v1/;
+#include "suniv-f1c100s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+    model = "Custom F1C200S ESP32-C3 Debug Gateway";
+    compatible = "custom,f1c200s-gateway", "allwinner,suniv-f1c100s";
+    aliases {
+        serial0 = &uart0;
+        serial1 = &uart1;
+        serial2 = &uart2;
+        spi0 = &spi0;
+        spi1 = &spi1;
+    };
+    chosen { stdout-path = "serial0:115200n8"; };
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x80000000 0x04000000>;
+    };
+    reg_usb0_vbus: regulator-usb0-vbus {
+        compatible = "regulator-fixed";
+        regulator-name = "usb0-vbus";
+        regulator-min-microvolt = <5000000>;
+        regulator-max-microvolt = <5000000>;
+        gpio = <&pio 3 7 GPIO_ACTIVE_HIGH>;
+        /* Board +5V input confirmed; SY6280 EN is PD7 in the 2026-10-12 netlist. */
+        status = "okay";
+        enable-active-high;
+        regulator-boot-on;
+    };
+    usb_power_control: usb-power-control {
+        compatible = "regulator-output";
+        vout-supply = <&reg_usb0_vbus>;
+    };
+    leds {
+        compatible = "gpio-leds";
+        /* 2026-10-12 netlist has no LED series resistors: leave GPIOs unclaimed. */
+        status = "disabled";
+        led-run {
+            label = "gateway:status";
+            gpios = <&pio 4 6 GPIO_ACTIVE_HIGH>;
+            linux,default-trigger = "heartbeat";
+        };
+        led-error {
+            label = "gateway:error";
+            gpios = <&pio 4 5 GPIO_ACTIVE_HIGH>;
+            default-state = "off";
+        };
+    };
+};
+
+&pio {
+    /* Line index = 32 * bank + pin: pinned sunxi GPIO driver, pin_base=0. */
+    gpio-line-names =
+        "", "", "", "", "", "", "", "", /* 0..7 */
+        "", "", "", "", "", "", "", "", /* 8..15 */
+        "", "", "", "", "", "", "", "", /* 16..23 */
+        "", "", "", "", "", "", "", "", /* 24..31 */
+        "", "", "", "", "", "", "", "", /* 32..39 */
+        "", "", "", "", "", "", "", "", /* 40..47 */
+        "", "", "", "", "", "", "", "", /* 48..55 */
+        "", "", "", "", "", "", "", "", /* 56..63 */
+        "", "", "", "", "", "", "", "", /* 64..71 */
+        "", "", "", "", "", "", "", "", /* 72..79 */
+        "", "", "", "", "", "", "", "", /* 80..87 */
+        "", "", "", "", "", "", "", "", /* 88..95 */
+        "", "", "", "", "", "F407_RESET_ASSERT", "F407_BOOT0_SET", "USB_VBUS_ENABLE", /* 96..103 */
+        "", "", "", "", "", "", "", "", /* 104..111 */
+        "", "", "", "", "", "", "", "", /* 112..119 */
+        "", "", "", "", "", "", "", "", /* 120..127 */
+        "", "", "", "", "", "", "", "", /* 128..135: PE4 is NC */
+        "", "", "", "", "", "", "", "", /* 136..143 */
+        "", "", "", "", "", "", "", "", /* 144..151 */
+        "", "", "", "", "", "", "", "", /* 152..159 */
+        "", "", "", "", "", "", "", "", /* 160..167 */
+        "", "", "", "", "", "", "", "", /* 168..175 */
+        "", "", "", "", "", "", "", "", /* 176..183 */
+        "", "", "", "", "", "", "", ""; /* 184..191 */
+    uart1_pd_pins: uart1-pd-pins {
+        pins = "PD3", "PD4";
+        function = "uart1";
+        bias-pull-up;
+    };
+    uart2_pd_pins: uart2-pd-pins {
+        pins = "PD13", "PD14";
+        function = "uart2";
+        bias-pull-up;
+    };
+    wifi_spi1_pins: wifi-spi1-pins {
+        pins = "PE7", "PE8", "PE9", "PE10";
+        function = "spi1";
+        bias-disable;
+    };
+    wifi_gpio_pins: wifi-gpio-pins {
+        pins = "PD17", "PE11", "PE12";
+        function = "gpio_in";
+        bias-disable;
+    };
+    // PD5 directly connects to target NRST: userspace requests active-low OD.
+    // NRST rises through the target's pull-up; never drive it high here.
+    // PD6 directly connects to BOOT0; target-side power-on pull-down is required.
+};
+
+/* Keep the console RX at UART idle high when the debug cable is absent. */
+&uart0_pe_pins {
+    bias-pull-up;
+};
+
+&uart0 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart0_pe_pins>;
+    status = "okay";
+};
+&uart1 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart1_pd_pins>;
+    status = "okay";
+};
+/* Reserved K230 link, H1-9 TX / H1-11 RX; no login console on ttyS2. */
+&uart2 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart2_pd_pins>;
+    status = "okay";
+};
+&spi0 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&spi0_pc_pins>;
+    /* Exported board: W25N01GV only, using the native PC1/CS0. */
+    num-cs = <1>;
+    status = "okay";
+    flash@0 {
+        compatible = "spi-nand";
+        reg = <0>;
+        spi-max-frequency = <10000000>;
+        #include "gateway-nand-partitions.dtsi"
+    };
+};
+&spi1 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&wifi_spi1_pins>;
+    status = "okay";
+    wifi@0 {
+        compatible = "espressif,esp32-spi";
+        reg = <0>;
+        spi-max-frequency = <2000000>;
+        spi-cpol;
+        /* GPIO descriptors request the pins; a pinctrl claim here conflicts. */
+        /* Direct ESP EN + SW2: assert low, release to input via OD emulation. */
+        reset-gpios = <&pio 3 17 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
+        handshake-gpios = <&pio 4 11 GPIO_ACTIVE_HIGH>;
+        data-ready-gpios = <&pio 4 12 GPIO_ACTIVE_HIGH>;
+    };
+};
+&mmc0 { status = "disabled"; };
+&mmc1 { status = "disabled"; };
+&otg_sram { status = "okay"; };
+&usbphy {
+    /* PD7 is owned by the exclusive userspace regulator consumer above. */
+    status = "okay";
+};
+&usb_otg {
+    dr_mode = "host";
+    status = "okay";
+};

@@ -1,0 +1,31 @@
+#!/bin/sh
+logger_pid=
+printf '%s\n' "$$" > /run/gateway-log-service.pid
+stop_logger() {
+  if [ -n "$logger_pid" ] &&
+     gateway-process-alive /run/gateway-logger.pid /usr/bin/gateway-logger &&
+     [ "$(cat /run/gateway-logger.pid)" = "$logger_pid" ]; then
+    kill "$logger_pid" 2>/dev/null
+    wait "$logger_pid" 2>/dev/null
+  fi
+  rm -f /run/gateway-logger.pid /run/gateway-log-service.pid
+  exit 0
+}
+trap stop_logger INT TERM
+while :; do
+  # A killed wrapper can leave its native logger alive. Adopt it without
+  # opening either UART twice or replacing its PID with a failed contender.
+  if gateway-process-alive /run/gateway-logger.pid /usr/bin/gateway-logger; then
+    logger_pid=$(cat /run/gateway-logger.pid)
+    while gateway-process-alive /run/gateway-logger.pid /usr/bin/gateway-logger &&
+          [ "$(cat /run/gateway-logger.pid)" = "$logger_pid" ]; do sleep 2; done
+    logger_pid=
+    continue
+  fi
+  /usr/bin/gateway-logger &
+  logger_pid=$!
+  printf '%s\n' "$logger_pid" > /run/gateway-logger.pid
+  wait "$logger_pid"
+  logger_pid=
+  sleep 2
+done

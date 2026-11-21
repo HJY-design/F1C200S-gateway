@@ -1,0 +1,14 @@
+#!/bin/sh
+pidfile=/run/gateway-watchdog.pid
+case "$1" in
+  start)
+    [ -c /dev/watchdog0 ] || exit 0
+    printf 'Starting system watchdog: '
+    start-stop-daemon -S -q -b -m -p "$pidfile" -x /sbin/watchdog -- -F -t 4 -T 16 /dev/watchdog0
+    ;;
+  stop)
+    start-stop-daemon -K -q -p "$pidfile" -x /sbin/watchdog
+    rm -f "$pidfile"
+    ;;
+  *) echo "Usage: $0 {start|stop}"; exit 1 ;;
+esac

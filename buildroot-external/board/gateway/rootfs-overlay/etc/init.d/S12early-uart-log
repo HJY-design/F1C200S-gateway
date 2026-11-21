@@ -1,0 +1,8 @@
+#!/bin/sh
+# Open the existing UART logger after device discovery and before Wi-Fi auth.
+# Keep S42 as the service entry point for manual control and normal shutdown.
+case "$1" in
+  start) exec /etc/init.d/S42gateway-logger start ;;
+  stop) exit 0 ;;
+  *) exit 1 ;;
+esac

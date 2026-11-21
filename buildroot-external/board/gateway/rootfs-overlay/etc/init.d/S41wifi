@@ -1,0 +1,119 @@
+#!/bin/sh
+iface=wlan0
+run=${GW_WIFI_RUN_DIR:-/run}
+config=${GW_WIFI_CONFIG:-/etc/wpa_supplicant.conf}
+wpa_pid=$run/gateway-wpa.pid
+dhcp_pid=$run/gateway-dhcp.pid
+event_pid=$run/gateway-wifi-event.pid
+prefer_pid=$run/gateway-wifi-prefer.pid
+allowed_file=$run/gateway-wifi-allowed.ids
+bound() { gateway-timeout "$@"; }
+start_recovery_monitor() {
+  [ ! -e "$allowed_file" ] || [ -s "$allowed_file" ] || return 0
+  if [ ! -s "$prefer_pid" ] || ! kill -0 "$(cat "$prefer_pid")" 2>/dev/null; then
+    start-stop-daemon -S -q -b -m -p "$prefer_pid" -x /usr/bin/gateway-wifi-prefer
+  fi
+}
+case "$1" in
+  start)
+    rm -f "$run/gateway-wifi.disabled"
+    [ -s "$config" ] || exit 0
+    grep -q '^[[:space:]]*network=' "$config" || exit 0
+    # An initial probe/interface timeout must not leave Wi-Fi without retries.
+    # Install after the config checks, so an unconfigured board stays idle.
+    trap 'start_recovery_monitor' EXIT
+    printf 'Starting Wi-Fi: '
+    bound 15 modprobe esp32_spi || exit 1
+    attempts=0
+    until ip link show "$iface" >/dev/null 2>&1; do
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt 20 ] || {
+        echo 'interface timeout; recovery monitor will retry'
+        logger -t gateway-wifi 'Initial interface timeout; recovery monitor remains enabled'
+        exit 1
+      }
+      sleep 1
+    done
+    bound 8 ip link set "$iface" up || exit 1
+    created_wpa=0
+    if ! bound 4 wpa_cli -i "$iface" ping 2>/dev/null | grep -q '^PONG'; then
+      bound 8 wpa_supplicant -B -t -D nl80211 -i "$iface" -c "$config" \
+        -P "$wpa_pid" -f "$run/wpa_supplicant.log" || exit 1
+      created_wpa=1
+    fi
+    if [ "$created_wpa" = 1 ] || [ ! -e "$allowed_file" ]; then
+      saved_networks=$(bound 4 wpa_cli -i "$iface" list_networks) || exit 1
+      case "$saved_networks" in
+        'network id / ssid / bssid / flags'*) ;;
+        *) echo 'cannot read saved network states'; exit 1 ;;
+      esac
+      printf '%s\n' "$saved_networks" | awk -F '\t' \
+        'NR > 1 && $1 ~ /^[0-9]+$/ && $4 !~ /\[DISABLED\]/ {print $1}' > "$allowed_file.tmp" || exit 1
+      mv "$allowed_file.tmp" "$allowed_file" || exit 1
+    fi
+    if [ ! -s "$dhcp_pid" ] || ! kill -0 "$(cat "$dhcp_pid")" 2>/dev/null; then
+      bound 15 udhcpc -b -i "$iface" -p "$dhcp_pid" -t 3 -T 3
+    fi
+    if [ ! -s "$event_pid" ] || ! kill -0 "$(cat "$event_pid")" 2>/dev/null; then
+      start-stop-daemon -S -q -b -m -p "$event_pid" -x /usr/sbin/wpa_cli -- -r -i "$iface" -a /usr/bin/gateway-wifi-event
+    fi
+    ;;
+  stop|stop-transport)
+    [ "$1" != stop ] || : > "$run/gateway-wifi.disabled"
+    # A recovery must not kill its own supervisor. An explicit stop still does.
+    [ "$1" != stop ] || start-stop-daemon -K -q -p "$prefer_pid"
+    start-stop-daemon -K -q -p "$event_pid" -x /usr/sbin/wpa_cli
+    # BusyBox runs this applet with argv[0]=udhcpc; matching /sbin/udhcpc
+    # misses it. Also reap clients orphaned by the earlier stop command.
+    start-stop-daemon -K -q -p "$dhcp_pid" -n udhcpc
+    for task_pid in $(pidof udhcpc); do
+      task_args=$(tr '\000' ' ' 2>/dev/null < "/proc/$task_pid/cmdline")
+      case " $task_args " in
+        *" -i $iface "*)
+          case " $task_args " in
+            *" -p $dhcp_pid "*) kill "$task_pid" 2>/dev/null ;;
+          esac
+          ;;
+      esac
+    done
+    bound 4 wpa_cli -i "$iface" terminate >/dev/null 2>&1
+    start-stop-daemon -K -q -p "$wpa_pid" -n wpa_supplicant
+    rm -f "$wpa_pid" "$dhcp_pid" "$event_pid"
+    [ "$1" != stop ] || rm -f "$prefer_pid"
+    ;;
+  restart|recover)
+    # ESP-Hosted can retain an old authentication generation across ESSIDs.
+    # Recreate only the Wi-Fi device; the logger and HTTP service keep running.
+    lock=$run/gateway-wifi-recover.lock
+    if ! mkdir "$lock" 2>/dev/null; then
+      # Do not remove a new lock before its owner has written the PID.
+      [ -s "$lock/pid" ] || sleep 1
+      owner=$(cat "$lock/pid" 2>/dev/null)
+      case "$owner" in
+        '') rmdir "$lock" 2>/dev/null || exit 0 ;;
+        *[!0-9]*) logger -t gateway-wifi 'Invalid recovery lock owner'; exit 1 ;;
+        *)
+          if kill -0 "$owner" 2>/dev/null; then exit 0; fi
+          rm -f "$lock/pid"
+          rmdir "$lock" 2>/dev/null || exit 1
+          ;;
+      esac
+      mkdir "$lock" 2>/dev/null || exit 0
+    fi
+    echo "$$" > "$lock/pid" || exit 1
+    trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null; start_recovery_monitor' EXIT
+    trap 'exit 1' HUP INT TERM
+    cut -d. -f1 /proc/uptime > "$run/gateway-wifi-last-recovery"
+    logger -t gateway-wifi 'Restarting Wi-Fi device for network selection/recovery'
+    gateway-event 'wifi-recovery-start' || :
+    bound 15 "$0" stop-transport
+    sleep 1
+    if ! bound 15 modprobe -r esp32_spi; then
+      logger -t gateway-wifi 'Wi-Fi unload failed/timed out; supervisor retained, board not rebooted'
+      gateway-event 'wifi-recovery-unload-failed-or-timeout' || :
+      exit 1
+    fi
+    bound 50 "$0" start
+    ;;
+  *) echo "Usage: $0 {start|stop|restart|recover}"; exit 1 ;;
+esac

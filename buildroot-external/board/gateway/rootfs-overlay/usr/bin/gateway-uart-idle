@@ -1,0 +1,40 @@
+#!/bin/sh
+# F1C200S only: bank stride 0x24, pull offset 0x1c, two bits per pin.
+# 01 means weak pull-up. Only RX bias fields are changed.
+set -eu
+action=${1:-apply}
+case "$action" in apply|check) ;; *) echo "Usage: $0 {apply|check}" >&2; exit 2 ;; esac
+compatible=${GW_UART_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
+mem=${GW_UART_DEVMEM:-/sbin/devmem}
+tr '\000' '\n' < "$compatible" | grep -qx 'custom,f1c200s-gateway' || {
+    echo "Refusing RX bias on an unknown board" >&2
+    exit 1
+}
+pd=$("$mem" 0x01c20888 32)
+pe=$("$mem" 0x01c208ac 32)
+pd_next=$(( (pd & 0xcfffff3f) | 0x10000040 ))
+pe_next=$(( (pe & 0xfffffffc) | 0x00000001 ))
+if [ "$action" = apply ]; then
+    [ "$((pd))" -eq "$pd_next" ] || "$mem" 0x01c20888 32 "$(printf '0x%08x' "$pd_next")"
+    [ "$((pe))" -eq "$pe_next" ] || "$mem" 0x01c208ac 32 "$(printf '0x%08x' "$pe_next")"
+fi
+pd_after=$("$mem" 0x01c20888 32)
+pe_after=$("$mem" 0x01c208ac 32)
+[ "$(( (pd_after >> 6) & 3 ))" -eq 1 ] &&
+[ "$(( (pd_after >> 28) & 3 ))" -eq 1 ] &&
+[ "$(( pe_after & 3 ))" -eq 1 ] || {
+    echo "UART RX pull-up verification failed" >&2
+    exit 1
+}
+[ "$(( (pd ^ pd_after) & 0xcfffff3f ))" -eq 0 ] &&
+[ "$(( (pe ^ pe_after) & 0xfffffffc ))" -eq 0 ] || {
+    echo "Unrelated pull bits changed; inspect concurrent pin configuration" >&2
+    exit 1
+}
+printf 'UART RX idle high: ttyS0/PE0 ttyS1/PD3 ttyS2/PD14 verified\n'
+if [ "$action" = apply ]; then
+    status=${GW_UART_STATUS:-/run/gateway-uart-idle.json}
+    printf '{"ok":true,"ttyS0":"PE0 pull-up","ttyS1":"PD3 pull-up","ttyS2":"PD14 pull-up"}\n' > "$status.tmp"
+    mv "$status.tmp" "$status"
+fi
+

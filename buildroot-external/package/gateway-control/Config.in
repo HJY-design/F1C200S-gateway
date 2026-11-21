@@ -1,0 +1,7 @@
+config BR2_PACKAGE_GATEWAY_CONTROL
+	bool "F407 gateway GPIO control service"
+	select BR2_PACKAGE_LIBGPIOD
+	depends on BR2_TOOLCHAIN_HEADERS_AT_LEAST_4_8
+	help
+	  Hold and control PD5 NRST request, PD6 BOOT0 and PE4 target interface.
+	  This board uses libgpiod 1.6.x line names; hardware tests are required.
